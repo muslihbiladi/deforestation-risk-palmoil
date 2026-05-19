@@ -119,4 +119,5 @@ def _print_dry_run_summary(config: RunConfig) -> None:
     print(f"  plantation   : t2={config.plantation_t2}, t3={config.plantation_t3}")
     print(f"  mill source  : {config.mill_source}")
     print(f"  variants     : {config.model_variants}")
-    print(f"  run_gwr      : {config.run_gwr}")
+    print(f"  sigma_km     : {config.sigma_km}")
+    print(f"  radius_km    : {config.radius_km}")

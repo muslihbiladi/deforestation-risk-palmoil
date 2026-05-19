@@ -115,35 +115,33 @@ def user_input_files(tmp_path) -> dict:
 
 @pytest.fixture
 def minimal_config_yaml(tmp_path, user_input_files) -> Path:
-    """Write a minimal valid config.yaml to tmp_path/configs/test.yaml."""
     (tmp_path / "configs").mkdir(exist_ok=True)
     cfg = {
         "run": {"project": "test_proj", "area": "test_area", "task": "test"},
         "aoi": {"source": str(user_input_files["hgu"]), "buffer": 0.0},
         "crs": "EPSG:32750",
+        "cache_dir": "cache/",
         "forest": {"source": "tmf", "years": [2015, 2020, 2024], "perc": 75},
         "variables": {"use_ghsl_towns": False, "ghsl_years": None, "osm_timeout": 180},
         "user_inputs": {
             "peatland": {"path": str(user_input_files["peatland"]), "type": "binary"},
             "hgu": {"path": str(user_input_files["hgu"])},
-            "plantation": {
-                "t2": str(user_input_files["plantation_t2"]),
-                "t3": None,
-                "industrial_value": 1,
-                "smallholder_value": 2,
-            },
+            "plantation": {"t2": str(user_input_files["plantation_t2"]),
+                           "t3": None, "industrial_value": 1, "smallholder_value": 2},
         },
-        "mill": {"source": "trase"},
-        "process": {"kde_bandwidth_km": 35.0, "lq_epsilon": 0.001, "lq_direction": "mp"},
+        "mill": {"source": "trase", "path": None},
+        "process": {
+            "gravity": {"sigma_km": 25.0, "radius_km": 80.0},
+            "sensitivity": {"sigmas_km": [15.0, 25.0, 40.0]},
+        },
         "model": {
-            "variants": ["A", "B"],
-            "csize": 10, "burnin": 100, "mcmc": 100, "thin": 1,
-            "run_gwr": False, "gwr_bandwidth": "adaptive",
+            "variants": ["A", "B"], "nsamp": 10000, "csize": 10,
+            "Vbeta": 1000, "burnin": 100, "mcmc": 100, "thin": 1, "seed": 42,
         },
-        "output": {
-            "project_future": False, "projection_year": 2035,
-            "risk_classes": 5, "scenarios": [],
-        },
+        "parallel": {"max_workers": None, "cpu_fraction": 0.9,
+                     "ram_per_dist_gb": 0.5, "ram_per_icar_gb": 1.0,
+                     "ram_per_predict_gb": 0.75},
+        "output": {"project_future": False, "projection_year": 2035},
     }
     path = tmp_path / "configs" / "test.yaml"
     path.write_text(yaml.dump(cfg))
