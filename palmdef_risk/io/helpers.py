@@ -19,6 +19,25 @@ from pathlib import Path
 
 
 # ============================================================
+# AOI UTILITIES
+# ============================================================
+
+def aoi_bbox_4326(aoi_source: str) -> tuple:
+    """Return (xmin, ymin, xmax, ymax) in EPSG:4326 for the AOI source."""
+    import geopandas as gpd
+    try:
+        parts = [float(x) for x in str(aoi_source).split(",")]
+        if len(parts) == 4:
+            return tuple(parts)
+    except ValueError:
+        pass
+    gdf = gpd.read_file(aoi_source)
+    gdf_4326 = gdf.to_crs("EPSG:4326")
+    xmin, ymin, xmax, ymax = gdf_4326.total_bounds
+    return (xmin, ymin, xmax, ymax)
+
+
+# ============================================================
 # WORKSPACE UTILITIES
 # ============================================================
 

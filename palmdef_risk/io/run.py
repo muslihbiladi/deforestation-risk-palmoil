@@ -35,13 +35,10 @@ _SUBDIRS = [
     "data/raw/variables",
     "data/raw/mill",
     "data/raw/user_inputs",
-    "data/intermediate/kde",
     "output/models",
     "output/diagnostics",
     "output/predictions",
-    "output/correlation",
-    "output/scenarios",
-    "output/maps",
+    "output/sensitivity",
     "logs",
 ]
 
@@ -53,6 +50,14 @@ def create_run(
 ) -> RunContext:
     config_path = Path(config_path)
     config = RunConfig.from_yaml(config_path)
+
+    # CRS auto-detection when crs is null
+    if config.crs is None:
+        from palmdef_risk.data.utm import primary_utm_zone
+        from palmdef_risk.io.helpers import aoi_bbox_4326
+        bbox = aoi_bbox_4326(config.aoi_source)
+        config.crs = primary_utm_zone(bbox)
+        logging.getLogger(__name__).info("Auto-detected CRS: %s", config.crs)
 
     errors = config.validate()
     if errors:
