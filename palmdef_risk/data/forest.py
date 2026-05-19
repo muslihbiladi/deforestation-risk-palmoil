@@ -1093,7 +1093,7 @@ def get_fcc(
 from palmdef_risk.io.run import RunContext
 
 
-def download_forest(ctx: RunContext) -> dict:
+def download_forest(ctx: RunContext, use_cache: bool = True) -> dict:
     """Download forest cover change data for this run.
 
     Reads all parameters from ctx.config. Writes outputs to
@@ -1110,6 +1110,6 @@ def download_forest(ctx: RunContext) -> dict:
         buff=cfg.aoi_buffer,
         perc=cfg.forest_perc,
         output_file=str(out_dir / "forest_cover.tif"),
-        output_crs=None,
+        output_crs=ctx.config.crs,
         verbose=True,
     )
