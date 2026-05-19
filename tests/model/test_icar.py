@@ -1,6 +1,6 @@
 import pytest
 from pathlib import Path
-from palmoil_risk.model.icar import build_formula, _add_interactions
+from palmdef_risk.model.icar import build_formula, _add_interactions
 import pandas as pd
 import numpy as np
 

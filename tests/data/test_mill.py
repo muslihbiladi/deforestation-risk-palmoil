@@ -1,8 +1,8 @@
 import pytest
 from unittest.mock import patch
 from pathlib import Path
-from palmoil_risk.io.run import create_run
-from palmoil_risk.data.mill import download_mill, _filter_to_aoi
+from palmdef_risk.io.run import create_run
+from palmdef_risk.data.mill import download_mill, _filter_to_aoi
 
 
 def test_filter_to_aoi_returns_geodataframe(tmp_path):
@@ -45,8 +45,8 @@ def test_download_mill_writes_gpkg(minimal_config_yaml, tmp_path):
 
     ctx = create_run(minimal_config_yaml, runs_root=tmp_path / "runs")
 
-    with patch("palmoil_risk.data.mill._parse_aoi_extent", return_value=(111.0, -3.0, 114.0, 0.0)):
-        with patch("palmoil_risk.data.mill._fetch_trase", return_value=mock_gdf):
+    with patch("palmdef_risk.data.mill._parse_aoi_extent", return_value=(111.0, -3.0, 114.0, 0.0)):
+        with patch("palmdef_risk.data.mill._fetch_trase", return_value=mock_gdf):
             result = download_mill(ctx)
 
     assert result["mill"].exists()

@@ -17,7 +17,7 @@ def _write_float32(path, arr, gt, proj):
 
 
 def test_compute_lq_mp_pm_reciprocal(tmp_path):
-    from palmoil_risk.process.lq import compute_lq
+    from palmdef_risk.process.lq import compute_lq
     from osgeo import osr
 
     srs = osr.SpatialReference()
@@ -45,7 +45,7 @@ def test_compute_lq_mp_pm_reciprocal(tmp_path):
 
 
 def test_compute_lq_respects_nodata(tmp_path):
-    from palmoil_risk.process.lq import compute_lq
+    from palmdef_risk.process.lq import compute_lq
     from osgeo import osr
 
     srs = osr.SpatialReference()
@@ -72,7 +72,7 @@ def test_compute_lq_respects_nodata(tmp_path):
 
 
 def test_classify_lq_zones(tmp_path):
-    from palmoil_risk.process.lq import classify_lq_zones
+    from palmdef_risk.process.lq import classify_lq_zones
     from osgeo import osr
 
     srs = osr.SpatialReference()

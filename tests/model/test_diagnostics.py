@@ -18,7 +18,7 @@ class _FakeMod:
 
 
 def test_compute_moran_positive_autocorrelation(tmp_path):
-    from palmoil_risk.model.diagnostics import compute_moran
+    from palmdef_risk.model.diagnostics import compute_moran
 
     ctx = _FakeCtx(tmp_path)
     # 9 points in a 3x3 grid; residuals identical within each row → positive autocorrelation
@@ -36,7 +36,7 @@ def test_compute_moran_positive_autocorrelation(tmp_path):
 
 
 def test_check_beta_stability_flags_large_shift(tmp_path):
-    from palmoil_risk.model.diagnostics import check_beta_stability
+    from palmdef_risk.model.diagnostics import check_beta_stability
 
     mod_with = _FakeMod(["dist_mill"], [3.0])
     mod_without = _FakeMod(["dist_mill"], [2.0])
@@ -47,7 +47,7 @@ def test_check_beta_stability_flags_large_shift(tmp_path):
 
 
 def test_check_beta_stability_no_warning_small_shift(tmp_path):
-    from palmoil_risk.model.diagnostics import check_beta_stability
+    from palmdef_risk.model.diagnostics import check_beta_stability
 
     mod_with = _FakeMod(["altitude"], [1.05])
     mod_without = _FakeMod(["altitude"], [1.0])
@@ -58,7 +58,7 @@ def test_check_beta_stability_no_warning_small_shift(tmp_path):
 
 
 def test_check_vif_collinear_columns():
-    from palmoil_risk.model.diagnostics import check_vif
+    from palmdef_risk.model.diagnostics import check_vif
 
     rng = np.random.default_rng(0)
     x = rng.standard_normal(200)
@@ -70,7 +70,7 @@ def test_check_vif_collinear_columns():
 
 
 def test_check_vif_independent_columns():
-    from palmoil_risk.model.diagnostics import check_vif
+    from palmdef_risk.model.diagnostics import check_vif
 
     rng = np.random.default_rng(1)
     df = pd.DataFrame({
@@ -84,7 +84,7 @@ def test_check_vif_independent_columns():
 
 
 def test_compile_dic_table_creates_csv(tmp_path):
-    from palmoil_risk.model.diagnostics import compile_dic_table
+    from palmdef_risk.model.diagnostics import compile_dic_table
 
     ctx = _FakeCtx(tmp_path)
     results = {

@@ -1,7 +1,7 @@
 import pytest
 import yaml
 from pathlib import Path
-from palmoil_risk.io.config import RunConfig
+from palmdef_risk.io.config import RunConfig
 
 
 def test_load_minimal_config(minimal_config_yaml):

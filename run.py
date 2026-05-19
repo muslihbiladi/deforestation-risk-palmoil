@@ -1,4 +1,4 @@
-"""CLI runner for the palmoil_risk pipeline.
+"""CLI runner for the palmdef_risk pipeline.
 
 Usage
 -----
@@ -81,7 +81,7 @@ def _run_notebook(
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="palmoil_risk pipeline runner"
+        description="palmdef_risk pipeline runner"
     )
     parser.add_argument(
         "--config", required=True,
@@ -117,7 +117,7 @@ def main() -> None:
 
     # Validate config fields (skipped for dry-run — file existence already checked)
     if not args.dry_run:
-        from palmoil_risk.io.config import RunConfig
+        from palmdef_risk.io.config import RunConfig
         cfg = RunConfig.from_yaml(config_path)
         errors = cfg.validate()
         if errors:

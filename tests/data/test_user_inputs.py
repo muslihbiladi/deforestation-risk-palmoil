@@ -1,7 +1,7 @@
 import pytest
 from pathlib import Path
-from palmoil_risk.io.run import create_run
-from palmoil_risk.data.user_inputs import ingest_user_inputs
+from palmdef_risk.io.run import create_run
+from palmdef_risk.data.user_inputs import ingest_user_inputs
 
 
 def test_ingest_copies_all_files(minimal_config_yaml, tmp_path):

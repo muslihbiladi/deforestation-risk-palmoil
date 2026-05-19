@@ -28,7 +28,7 @@ def _make_data(n=100, seed=42):
 
 
 def test_run_gwr_skipped_when_disabled(tmp_path):
-    from palmoil_risk.model.gwr import run_gwr
+    from palmdef_risk.model.gwr import run_gwr
 
     ctx = _FakeCtx(tmp_path)
     ctx.config.run_gwr = False
@@ -39,13 +39,13 @@ def test_run_gwr_skipped_when_disabled(tmp_path):
 
 
 def test_run_gwr_skipped_when_mgwr_missing(tmp_path):
-    from palmoil_risk.model.gwr import run_gwr
+    from palmdef_risk.model.gwr import run_gwr
 
     ctx = _FakeCtx(tmp_path)
 
     with patch.dict("sys.modules", {"mgwr": None, "mgwr.gwr": None, "mgwr.sel_bw": None}):
         import importlib
-        import palmoil_risk.model.gwr as gwr_mod
+        import palmdef_risk.model.gwr as gwr_mod
         importlib.reload(gwr_mod)
         result = gwr_mod.run_gwr(ctx, _make_data(), "y", ["x1", "x2"],
                                  coords_cols=("x", "y_coord"))
@@ -53,7 +53,7 @@ def test_run_gwr_skipped_when_mgwr_missing(tmp_path):
 
 
 def test_run_gwr_skipped_when_too_few_rows(tmp_path):
-    from palmoil_risk.model.gwr import run_gwr
+    from palmdef_risk.model.gwr import run_gwr
 
     ctx = _FakeCtx(tmp_path)
     small_df = _make_data(n=10)
@@ -79,7 +79,7 @@ def test_run_gwr_skipped_when_too_few_rows(tmp_path):
 
 
 def test_run_gwr_writes_outputs(tmp_path):
-    from palmoil_risk.model.gwr import run_gwr
+    from palmdef_risk.model.gwr import run_gwr
 
     ctx = _FakeCtx(tmp_path)
     df = _make_data(n=100)

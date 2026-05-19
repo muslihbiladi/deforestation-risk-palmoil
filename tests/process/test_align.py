@@ -2,11 +2,11 @@ import pytest
 import numpy as np
 from pathlib import Path
 from osgeo import gdal
-from palmoil_risk.io.helpers import verify_alignment
+from palmdef_risk.io.helpers import verify_alignment
 
 
 def test_rasterize_vector_produces_aligned_raster(tiny_raster, tiny_vector, tmp_path):
-    from palmoil_risk.io.helpers import get_mask_properties, rasterize_vector
+    from palmdef_risk.io.helpers import get_mask_properties, rasterize_vector
     mask_props = get_mask_properties(str(tiny_raster))
     out = tmp_path / "burned.tif"
     ok = rasterize_vector(str(tiny_vector), str(out), burn_value=1, mask_props=mask_props)
@@ -16,7 +16,7 @@ def test_rasterize_vector_produces_aligned_raster(tiny_raster, tiny_vector, tmp_
 
 
 def test_merge_plantation_raster(tmp_path):
-    from palmoil_risk.process.align import merge_plantation
+    from palmdef_risk.process.align import merge_plantation
     import numpy as np
     from osgeo import gdal
     arr = np.zeros((10, 10), dtype=np.uint8)

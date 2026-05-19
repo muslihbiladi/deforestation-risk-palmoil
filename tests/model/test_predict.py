@@ -37,7 +37,7 @@ def _make_model_pkl(tmp_path):
 
 
 def test_predict_risk_calls_far_and_returns_path(tmp_path):
-    from palmoil_risk.model.predict import predict_risk
+    from palmdef_risk.model.predict import predict_risk
 
     ctx = _FakeCtx(tmp_path)
     pkl_path, mod = _make_model_pkl(tmp_path)
@@ -51,7 +51,7 @@ def test_predict_risk_calls_far_and_returns_path(tmp_path):
 
 
 def test_project_future_skipped_when_disabled(tmp_path):
-    from palmoil_risk.model.predict import project_future
+    from palmdef_risk.model.predict import project_future
 
     ctx = _FakeCtx(tmp_path)
     ctx.config.project_future = False
@@ -62,7 +62,7 @@ def test_project_future_skipped_when_disabled(tmp_path):
 
 
 def test_project_future_skipped_when_years_nonpositive(tmp_path):
-    from palmoil_risk.model.predict import project_future
+    from palmdef_risk.model.predict import project_future
 
     ctx = _FakeCtx(tmp_path)
     ctx.config.project_future = True
@@ -75,7 +75,7 @@ def test_project_future_skipped_when_years_nonpositive(tmp_path):
 
 
 def test_project_future_calls_far_deforest(tmp_path):
-    from palmoil_risk.model.predict import project_future
+    from palmdef_risk.model.predict import project_future
 
     ctx = _FakeCtx(tmp_path)
     ctx.config.project_future = True
@@ -93,7 +93,7 @@ def test_project_future_calls_far_deforest(tmp_path):
 
 
 def test_classify_risk_correct_zones():
-    from palmoil_risk.model.predict import classify_risk
+    from palmdef_risk.model.predict import classify_risk
 
     arr = np.array([0.1, 0.3, 0.5, 0.7, 0.9])
     thresholds = [0.2, 0.4, 0.6, 0.8]
@@ -102,7 +102,7 @@ def test_classify_risk_correct_zones():
 
 
 def test_classify_risk_all_below_first_threshold():
-    from palmoil_risk.model.predict import classify_risk
+    from palmdef_risk.model.predict import classify_risk
 
     arr = np.array([0.01, 0.05, 0.1])
     zones = classify_risk(arr, [0.2, 0.4, 0.6, 0.8])

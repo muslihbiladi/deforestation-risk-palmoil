@@ -1,6 +1,6 @@
 import pytest
 from pathlib import Path
-from palmoil_risk.io.run import create_run, load_run, RunContext
+from palmdef_risk.io.run import create_run, load_run, RunContext
 
 
 def test_create_run_builds_folder_tree(minimal_config_yaml, tmp_path):
