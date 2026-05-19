@@ -71,6 +71,8 @@ from osgeo import gdal, ogr, osr
 
 gdal.UseExceptions()
 
+_WDPA_OUTPUT_NAME = "protected"   # never "pa" — causes patsy formula errors
+
 
 # ============================================================
 # Constants
@@ -776,9 +778,9 @@ def get_wdpa(aoi, output_dir="data", buff=0.0, output_crs=None,
         print(f"  Protected areas found: {count}")
         if count == 0:
             print("  WARNING: No protected areas in this AOI.")
-            pa_path = os.path.join(output_dir, "pa.gpkg")
+            pa_path = os.path.join(output_dir, f"{_WDPA_OUTPUT_NAME}.gpkg")
             _create_empty_gpkg(pa_path, ogr.wkbMultiPolygon)
-            return {"pa": pa_path}
+            return {_WDPA_OUTPUT_NAME: pa_path}
 
     # Download as GeoJSON via computeFeatures
     if verbose:
@@ -787,7 +789,7 @@ def get_wdpa(aoi, output_dir="data", buff=0.0, output_crs=None,
     fc_dict = wdpa_select.getInfo()
 
     # Write to GeoPackage
-    pa_path = os.path.join(output_dir, "pa.gpkg")
+    pa_path = os.path.join(output_dir, f"{_WDPA_OUTPUT_NAME}.gpkg")
     _geojson_to_gpkg(fc_dict, pa_path, "protected_areas", verbose=verbose)
 
     # Clip to AOI polygon (filterBounds only intersects — need true clip)
@@ -820,8 +822,8 @@ def get_wdpa(aoi, output_dir="data", buff=0.0, output_crs=None,
         os.remove(tmp)
 
     if verbose:
-        print(f"  pa : {pa_path}")
-    return {"pa": pa_path}
+        print(f"  {_WDPA_OUTPUT_NAME} : {pa_path}")
+    return {_WDPA_OUTPUT_NAME: pa_path}
 
 
 def _create_empty_gpkg(output_path, geom_type=ogr.wkbMultiPolygon):
@@ -1226,7 +1228,7 @@ def get_variables(aoi, output_dir="data", buff=0.0,
 from palmdef_risk.io.run import RunContext
 
 
-def download_variables(ctx: RunContext) -> dict:
+def download_variables(ctx: RunContext, use_cache: bool = True) -> dict:
     """Download all spatial covariates for this run.
 
     Reads parameters from ctx.config. Writes to ctx.raw_dir/variables/.
@@ -1239,7 +1241,7 @@ def download_variables(ctx: RunContext) -> dict:
         aoi=cfg.aoi_source,
         output_dir=str(out_dir),
         buff=cfg.aoi_buffer,
-        output_crs=None,
+        output_crs=cfg.crs,
         crop_to_aoi=True,
         parallel=True,
         max_retries=3,
