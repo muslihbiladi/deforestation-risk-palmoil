@@ -21,6 +21,8 @@ from palmdef_risk.io.helpers import (
 
 log = logging.getLogger(__name__)
 
+_PROTECTED_FILENAME = "protected"   # never "pa" — causes patsy formula errors
+
 
 def align_all(ctx: RunContext, inputs: dict) -> dict[str, Path]:
     """Align all raw inputs to the reference raster (forest_t2.tif).
@@ -58,7 +60,7 @@ def align_all(ctx: RunContext, inputs: dict) -> dict[str, Path]:
 
     # 3. Rasterize vectors — Byte
     vec_dir = ctx.raw_dir / "variables"
-    for name, burn in [("pa", 1), ("road", 1), ("river", 1), ("town", 1)]:
+    for name, burn in [(_PROTECTED_FILENAME, 1), ("road", 1), ("river", 1), ("town", 1)]:
         vec_path = _find_vector(vec_dir, name)
         if vec_path:
             proj_vec = ctx.data_dir / "intermediate" / f"{name}_proj.gpkg"
@@ -83,15 +85,15 @@ def align_all(ctx: RunContext, inputs: dict) -> dict[str, Path]:
             apply_mask_float(str(out), mask_props["invalid_mask"])
         result["peatland"] = out
 
-    # 5. HGU — vector → raster
+    # 5. HGU signed-distance raster
     hgu_src = inputs.get("hgu")
     if hgu_src:
-        proj_hgu = ctx.data_dir / "intermediate" / "hgu_proj.gpkg"
-        reproject_vector(str(hgu_src), str(proj_hgu), mask_props["srs"])
-        out = ctx.data_dir / "hgu.tif"
-        rasterize_vector(str(proj_hgu), str(out), 1, mask_props)
-        apply_mask(str(out), mask_props["invalid_mask"])
-        result["hgu"] = out
+        compute_hgu_signed_distance(
+            hgu_gpkg=str(hgu_src),
+            ref_tif=str(ref_file),
+            out_tif=str(ctx.data_dir / "hgu_signed_dist.tif"),
+        )
+        result["hgu_signed_dist"] = ctx.data_dir / "hgu_signed_dist.tif"
 
     # 6. Plantation — merge two classes → single presence raster
     plant_t2 = inputs.get("plantation_t2")
@@ -149,8 +151,9 @@ def compute_all_distances(ctx: RunContext) -> dict[str, Path]:
         result["dist_river"] = _dist(d / "river.tif", d / "dist_river.tif")
     if (d / "town.tif").exists():
         result["dist_town"] = _dist(d / "town.tif", d / "dist_town.tif")
-    elif (d / "pa.tif").exists():
-        result["dist_town"] = _dist(d / "pa.tif", d / "dist_town.tif")
+    if (d / f"{_PROTECTED_FILENAME}.tif").exists():
+        result["dist_protected"] = _dist(
+            d / f"{_PROTECTED_FILENAME}.tif", d / f"dist_{_PROTECTED_FILENAME}.tif")
     if (d / "mill.tif").exists():
         result["dist_mill"] = _dist(d / "mill.tif", d / "dist_mill.tif")
     if (d / "plantation.tif").exists():
@@ -209,6 +212,60 @@ def merge_plantation(
     out_ds.FlushCache()
     out_ds = None
     return Path(dst_path)
+
+
+def compute_hgu_signed_distance(
+    hgu_gpkg: str,
+    ref_tif: str,
+    out_tif: str,
+) -> None:
+    """Write signed distance to HGU boundary: negative inside, positive outside."""
+    from palmdef_risk.io.helpers import get_mask_properties, rasterize_vector
+
+    mask_props = get_mask_properties(ref_tif)
+    hgu_mask_path = Path(out_tif).parent / "_hgu_mask_tmp.tif"
+    rasterize_vector(hgu_gpkg, str(hgu_mask_path), burn_value=1, mask_props=mask_props)
+
+    ds_mask = gdal.Open(str(hgu_mask_path))
+    inside = ds_mask.GetRasterBand(1).ReadAsArray().astype(np.uint8)
+    gt = ds_mask.GetGeoTransform()
+    proj = ds_mask.GetProjection()
+    ny, nx = inside.shape
+    ds_mask = None
+
+    def _proximity(arr: np.ndarray) -> np.ndarray:
+        drv = gdal.GetDriverByName("MEM")
+        src_ds = drv.Create("", nx, ny, 1, gdal.GDT_Byte)
+        src_ds.SetGeoTransform(gt)
+        src_ds.SetProjection(proj)
+        src_ds.GetRasterBand(1).WriteArray(arr)
+        out_ds = drv.Create("", nx, ny, 1, gdal.GDT_Float32)
+        out_ds.SetGeoTransform(gt)
+        out_ds.SetProjection(proj)
+        gdal.ComputeProximity(
+            src_ds.GetRasterBand(1),
+            out_ds.GetRasterBand(1),
+            options=["DISTUNITS=GEO"],
+        )
+        return out_ds.GetRasterBand(1).ReadAsArray()
+
+    dist_from_inside = _proximity(inside)
+    outside = (1 - inside).astype(np.uint8)
+    dist_from_outside = _proximity(outside)
+    signed = dist_from_inside.astype(np.float32) - dist_from_outside.astype(np.float32)
+
+    drv = gdal.GetDriverByName("GTiff")
+    out_ds = drv.Create(
+        str(out_tif), nx, ny, 1, gdal.GDT_Float32,
+        options=["COMPRESS=LZW", "TILED=YES"],
+    )
+    out_ds.SetGeoTransform(gt)
+    out_ds.SetProjection(proj)
+    out_ds.GetRasterBand(1).WriteArray(signed)
+    out_ds.GetRasterBand(1).SetNoDataValue(-9999.0)
+    out_ds.FlushCache()
+    out_ds = None
+    Path(str(hgu_mask_path)).unlink(missing_ok=True)
 
 
 def _find_vector(directory: Path, name: str) -> Path | None:
