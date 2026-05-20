@@ -9,7 +9,7 @@ Outputs:
         - slope.tif        : Slope in degrees (NASA SRTM 30m via GEE)
 
     Vectors (GeoPackage):
-        - pa.gpkg          : Protected area polygons (WDPA via GEE)
+        - protected.gpkg   : Protected area polygons (WDPA via GEE)
         - road.gpkg        : Road network lines (OSM via osmnx)
         - river.gpkg       : Waterway lines (OSM via osmnx)
         - town.gpkg        : Settlement points (OSM via osmnx)
@@ -737,7 +737,7 @@ def get_wdpa(aoi, output_dir="data", buff=0.0, output_crs=None,
     :param output_crs: Reproject output to this CRS (e.g. "EPSG:32749").
         If None (default), output stays in EPSG:4326.
     :param verbose: Print progress.
-    :return: Dict with 'pa' file path.
+    :return: Dict with 'protected' file path.
     """
     if verbose:
         print("=" * 60)
@@ -1132,7 +1132,7 @@ def get_variables(aoi, output_dir="data", buff=0.0,
         - ghsl_built_t2.tif, ghsl_built_t3.tif  (only when use_ghsl_towns=True)
 
     Vector outputs (GeoPackage):
-        - pa.gpkg
+        - protected.gpkg
         - road.gpkg
         - river.gpkg
         - town.gpkg        (only when use_ghsl_towns=False)
