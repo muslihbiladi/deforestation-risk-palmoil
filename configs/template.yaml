@@ -1,5 +1,6 @@
+# yaml-language-server: $schema=./schema.json
 # ──────────────────────────────────────────────────────────────────────────────
-# palmoil_risk run configuration template
+# palmdef_risk run configuration template
 # Copy this file, fill in all required fields, then run:
 #   python run.py --config configs/my_run.yaml
 # ──────────────────────────────────────────────────────────────────────────────
@@ -13,18 +14,22 @@ aoi:
   source: data/aoi/study_area.gpkg  # vector file path OR "xmin,ymin,xmax,ymax" bbox
   buffer: 5000                      # buffer in metres applied to AOI before download
 
-crs: "EPSG:32750"   # UTM CRS for the study area; see UTM table in CLAUDE.md
+# UTM CRS for the study area (auto-detected from AOI centroid if omitted)
+# Common values: EPSG:32749 (UTM 49N), EPSG:32750 (UTM 50S), EPSG:32754 (UTM 54S)
+crs: "EPSG:32750"
+
+cache_dir: cache/   # directory for cached raw downloads (shared across runs)
 
 # ── Forest data ──────────────────────────────────────────────────────────────
 forest:
-  source: tmf         # "tmf" (JRC 2000–2025) or "gfc" (Hansen 2001–2025)
-  years: [2015, 2020, 2023]   # [t1, t2, t3]; t2 is reference, t3 is forecast start
-  perc: 75            # tree-cover threshold (gfc only; ignored for tmf)
+  source: tmf                  # "tmf" (JRC Tropical Moist Forest) or "gfc" (Hansen GFC)
+  years: [2015, 2020, 2024]    # [t1, t2, t3]; t2 = reference year, t3 = forecast start
+  perc: 75                     # tree-cover threshold % (gfc only; ignored for tmf)
 
 # ── Covariate downloads ───────────────────────────────────────────────────────
 variables:
-  use_ghsl_towns: false         # true → download GHSL built-up surface instead of OSM towns
-  ghsl_years: null              # required when use_ghsl_towns: true, e.g. [2020, 2023]
+  use_ghsl_towns: false         # true → GHSL built-up surface instead of OSM towns
+  ghsl_years: null              # required when use_ghsl_towns: true, e.g. [2020, 2024]
   osm_timeout: 180              # OSM query timeout in seconds
 
 # ── User-supplied spatial inputs ─────────────────────────────────────────────
@@ -33,7 +38,7 @@ user_inputs:
     path: data/user_inputs/peatland.gpkg   # peatland polygon layer (GeoPackage or shapefile)
     type: binary                           # "binary" or "continuous" (depth in metres)
   hgu:
-    path: data/user_inputs/hgu.gpkg        # HGU (hydrological geomorphic unit) polygon layer
+    path: data/user_inputs/hgu.gpkg        # HGU (hydrological geomorphic unit) polygons
   plantation:
     t2: data/user_inputs/plantation_t2.tif  # plantation raster at t2 date (reference year)
     t3: null                                # plantation raster at t3 date (optional)
@@ -42,30 +47,37 @@ user_inputs:
 
 # ── Mill data ─────────────────────────────────────────────────────────────────
 mill:
-  source: trase   # "trase" (UML via Trase) or "gfw" (Global Forest Watch)
+  source: trase    # "trase" (download from Trase) or "user" (supply your own file)
+  path: null       # required when source: "user"; path to GeoPackage/shapefile
 
 # ── Processing ────────────────────────────────────────────────────────────────
 process:
-  kde_bandwidth_km: 35.0  # Gaussian KDE bandwidth for mill density surface (km)
-  lq_epsilon: 0.001       # small constant added before LQ ratio to avoid division by zero
-  lq_direction: mp        # "mp" = mills/plantation (default); "pm" = plantation/mills
+  gravity:
+    sigma_km: 25.0    # Gaussian kernel σ for mill accessibility surface (km)
+    radius_km: 80.0   # truncation radius for Gaussian filter (must be > sigma_km)
+  sensitivity:
+    sigmas_km: [15.0, 25.0, 40.0]   # σ values for bandwidth sensitivity analysis
 
 # ── Modelling ─────────────────────────────────────────────────────────────────
 model:
-  variants: [A, B, E, F]   # subset of A–G to fit; G adds LQ×policy interactions
-  csize: 10                 # spatial cell size in km for ICAR neighbourhood
-  burnin: 1000              # MCMC burn-in iterations
-  mcmc: 1000                # MCMC sampling iterations after burn-in
-  thin: 1                   # MCMC thinning interval (keep every n-th sample)
-  run_gwr: false            # true → fit GWR on sample data (requires mgwr package)
-  gwr_bandwidth: adaptive   # "adaptive" (golden-section search) or a fixed value in metres
+  variants: [A, B, C]   # A = biophysical, B = +gravity_resid, C = +HGU spline
+  nsamp: 10000          # number of pixels to sample for model training
+  csize: 10             # spatial cell size in km for iCAR neighbourhood
+  Vbeta: 1000           # prior variance for fixed effects (> 100 may cause divergence)
+  burnin: 1000          # MCMC burn-in iterations
+  mcmc: 1000            # MCMC sampling iterations after burn-in
+  thin: 1               # MCMC thinning interval (keep every n-th sample)
+  seed: 42              # random seed for reproducibility
+
+# ── Parallel execution ────────────────────────────────────────────────────────
+parallel:
+  max_workers: null        # null = auto (governed by cpu_fraction + RAM constraints)
+  cpu_fraction: 0.9        # fraction of logical CPUs to use
+  ram_per_dist_gb: 0.5     # expected RAM per distance-computation task (GB)
+  ram_per_icar_gb: 1.0     # expected RAM per iCAR model fit (GB)
+  ram_per_predict_gb: 0.75 # expected RAM per prediction task (GB)
 
 # ── Output options ────────────────────────────────────────────────────────────
 output:
   project_future: false     # true → project future forest cover to projection_year
-  projection_year: 2035     # target year for future projection (must exceed forest.years[-1])
-  risk_classes: 5           # number of risk zones in the classified output raster
-  scenarios: []             # list of scenario names for multi-scenario runs (optional)
-  # scenarios:
-  #   - name: no_expansion
-  #   - name: high_expansion
+  projection_year: 2035     # target year (must exceed forest.years[-1])

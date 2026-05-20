@@ -1,0 +1,170 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "palmdef_risk run configuration",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["run", "aoi", "forest", "user_inputs", "mill", "process", "model", "parallel", "output"],
+  "properties": {
+    "run": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["project", "area", "task"],
+      "properties": {
+        "project": {"type": "string"},
+        "area": {"type": "string"},
+        "task": {"type": "string"}
+      }
+    },
+    "aoi": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["source"],
+      "properties": {
+        "source": {"type": "string"},
+        "buffer": {"type": "number", "minimum": 0}
+      }
+    },
+    "crs": {
+      "type": ["string", "null"],
+      "description": "UTM CRS (e.g. EPSG:32750). Auto-detected from AOI centroid if omitted."
+    },
+    "cache_dir": {
+      "type": "string",
+      "description": "Directory for cached raw downloads shared across runs."
+    },
+    "forest": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["source", "years"],
+      "properties": {
+        "source": {"type": "string", "enum": ["tmf", "gfc"]},
+        "years": {
+          "type": "array",
+          "items": {"type": "integer"},
+          "minItems": 2,
+          "description": "[t1, t2, t3]; t2 = reference year, t3 = forecast start"
+        },
+        "perc": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 100,
+          "description": "Tree-cover threshold % (gfc only)"
+        }
+      }
+    },
+    "variables": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "use_ghsl_towns": {"type": "boolean"},
+        "ghsl_years": {
+          "type": ["array", "null"],
+          "items": {"type": "integer"}
+        },
+        "osm_timeout": {"type": "integer", "minimum": 1}
+      }
+    },
+    "user_inputs": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["peatland", "hgu", "plantation"],
+      "properties": {
+        "peatland": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "path": {"type": ["string", "null"]},
+            "type": {"type": "string", "enum": ["binary", "continuous"]}
+          }
+        },
+        "hgu": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "path": {"type": ["string", "null"]}
+          }
+        },
+        "plantation": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "t2": {"type": ["string", "null"]},
+            "t3": {"type": ["string", "null"]},
+            "industrial_value": {"type": "integer"},
+            "smallholder_value": {"type": "integer"}
+          }
+        }
+      }
+    },
+    "mill": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["source"],
+      "properties": {
+        "source": {"type": "string", "enum": ["trase", "user"]},
+        "path": {"type": ["string", "null"]}
+      }
+    },
+    "process": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "gravity": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "sigma_km": {"type": "number", "minimum": 0, "exclusiveMinimum": true},
+            "radius_km": {"type": "number", "minimum": 0, "exclusiveMinimum": true}
+          }
+        },
+        "sensitivity": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "sigmas_km": {
+              "type": "array",
+              "items": {"type": "number", "minimum": 0, "exclusiveMinimum": true}
+            }
+          }
+        }
+      }
+    },
+    "model": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "variants": {
+          "type": "array",
+          "items": {"type": "string", "enum": ["A", "B", "C"]},
+          "minItems": 1
+        },
+        "nsamp": {"type": "integer", "minimum": 1},
+        "csize": {"type": "integer", "minimum": 1},
+        "Vbeta": {"type": "number", "minimum": 0, "exclusiveMinimum": true},
+        "burnin": {"type": "integer", "minimum": 1},
+        "mcmc": {"type": "integer", "minimum": 1},
+        "thin": {"type": "integer", "minimum": 1},
+        "seed": {"type": "integer"}
+      }
+    },
+    "parallel": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "max_workers": {"type": ["integer", "null"], "minimum": 1},
+        "cpu_fraction": {"type": "number", "minimum": 0, "maximum": 1},
+        "ram_per_dist_gb": {"type": "number", "minimum": 0},
+        "ram_per_icar_gb": {"type": "number", "minimum": 0},
+        "ram_per_predict_gb": {"type": "number", "minimum": 0}
+      }
+    },
+    "output": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "project_future": {"type": "boolean"},
+        "projection_year": {"type": "integer"}
+      }
+    }
+  }
+}
