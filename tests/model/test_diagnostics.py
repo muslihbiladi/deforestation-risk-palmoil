@@ -1,101 +1,60 @@
-import pytest
+import json
 import numpy as np
 import pandas as pd
+import pytest
 from pathlib import Path
 
 
-class _FakeCtx:
-    def __init__(self, tmp_path):
-        self.output_dir = Path(tmp_path)
-
-
-class _FakeMod:
-    def __init__(self, betas_names, betas, dic=None):
-        self.betas_names = betas_names
-        self.betas = betas
-        if dic is not None:
-            self.DIC = dic
-
-
-def test_compute_moran_positive_autocorrelation(tmp_path):
-    from palmdef_risk.model.diagnostics import compute_moran
-
-    ctx = _FakeCtx(tmp_path)
-    # 9 points in a 3x3 grid; residuals identical within each row → positive autocorrelation
-    coords = np.array([[i, j] for i in range(3) for j in range(3)], dtype=float)
-    residuals = np.array([1.0, 1.0, 1.0, -1.0, -1.0, -1.0, 1.0, 1.0, 1.0])
-
-    result = compute_moran(residuals, coords, ctx)
-
-    assert "moran_i" in result
-    assert "interpretation" in result
-    moran_json = (tmp_path / "diagnostics" / "moran.json").read_text()
-    import json
-    parsed = json.loads(moran_json)
-    assert parsed["moran_i"] == pytest.approx(result["moran_i"])
-
-
-def test_check_beta_stability_flags_large_shift(tmp_path):
-    from palmdef_risk.model.diagnostics import check_beta_stability
-
-    mod_with = _FakeMod(["dist_mill"], [3.0])
-    mod_without = _FakeMod(["dist_mill"], [2.0])
-    result = check_beta_stability(mod_with, mod_without, "dist_mill")
-
-    assert result["shift_pct"] == pytest.approx(50.0)
-    assert result["confounder_warning"] is True
-
-
-def test_check_beta_stability_no_warning_small_shift(tmp_path):
-    from palmdef_risk.model.diagnostics import check_beta_stability
-
-    mod_with = _FakeMod(["altitude"], [1.05])
-    mod_without = _FakeMod(["altitude"], [1.0])
-    result = check_beta_stability(mod_with, mod_without, "altitude")
-
-    assert result["shift_pct"] == pytest.approx(5.0)
-    assert result["confounder_warning"] is False
-
-
-def test_check_vif_collinear_columns():
-    from palmdef_risk.model.diagnostics import check_vif
-
-    rng = np.random.default_rng(0)
-    x = rng.standard_normal(200)
-    df = pd.DataFrame({"a": x, "b": x + rng.standard_normal(200) * 0.01})
-    vifs = check_vif(df, ["a", "b"])
-
-    assert vifs["a"] > 5
-    assert vifs["b"] > 5
-
-
-def test_check_vif_independent_columns():
-    from palmdef_risk.model.diagnostics import check_vif
-
-    rng = np.random.default_rng(1)
+def test_compute_vif_writes_json(tmp_path):
+    from palmdef_risk.model.diagnostics import compute_vif
+    rng = np.random.default_rng(42)
+    n = 200
     df = pd.DataFrame({
-        "x1": rng.standard_normal(200),
-        "x2": rng.standard_normal(200),
+        "altitude": rng.normal(0, 1, n),
+        "slope": rng.normal(0, 1, n),
+        "gravity_resid": rng.normal(0, 1, n),
     })
-    vifs = check_vif(df, ["x1", "x2"])
+    sample = tmp_path / "sample.csv"
+    df.to_csv(sample, index=False)
+    out = tmp_path / "vif.json"
+    compute_vif(["altitude", "slope", "gravity_resid"], sample, out)
+    assert out.exists()
+    data = json.loads(out.read_text())
+    assert "altitude" in data
+    assert data["altitude"] < 3.0
 
-    assert vifs["x1"] < 5
-    assert vifs["x2"] < 5
+
+def test_compute_vif_flags_high_vif(tmp_path, caplog):
+    import logging
+    from palmdef_risk.model.diagnostics import compute_vif
+    rng = np.random.default_rng(42)
+    n = 200
+    base = rng.normal(0, 1, n)
+    df = pd.DataFrame({
+        "x1": base,
+        "x2": base + rng.normal(0, 0.01, n),
+    })
+    sample = tmp_path / "sample.csv"
+    df.to_csv(sample, index=False)
+    out = tmp_path / "vif.json"
+    with caplog.at_level(logging.WARNING, logger="palmdef_risk"):
+        compute_vif(["x1", "x2"], sample, out)
+    assert any("VIF" in r.message for r in caplog.records)
 
 
-def test_compile_dic_table_creates_csv(tmp_path):
-    from palmdef_risk.model.diagnostics import compile_dic_table
-
-    ctx = _FakeCtx(tmp_path)
-    results = {
-        "A": {"model": _FakeMod([], [], dic=450.2)},
-        "B": {"model": _FakeMod([], [], dic=430.7)},
+def test_morans_i_output_has_required_keys(tmp_path):
+    from palmdef_risk.model.diagnostics import compute_morans_i
+    rng = np.random.default_rng(0)
+    residuals = {
+        "A": rng.normal(0, 1, 100),
+        "B": rng.normal(0, 0.5, 100),
     }
-    df = compile_dic_table(results, ctx)
-
-    assert len(df) == 2
-    assert df.iloc[0]["DIC"] == pytest.approx(430.7)
-    csv_path = tmp_path / "diagnostics" / "dic_table.csv"
-    assert csv_path.exists()
-    loaded = pd.read_csv(csv_path)
-    assert list(loaded["variant"]) == ["B", "A"]
+    coords = [(i * 30, j * 30) for i in range(10) for j in range(10)]
+    out = tmp_path / "moran.json"
+    compute_morans_i(residuals, coords, out)
+    assert out.exists()
+    data = json.loads(out.read_text())
+    for v in ["A", "B"]:
+        assert v in data
+        assert "I" in data[v]
+        assert "p_value" in data[v]
