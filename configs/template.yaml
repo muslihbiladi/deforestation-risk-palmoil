@@ -14,9 +14,9 @@ aoi:
   source: data/aoi/study_area.gpkg  # vector file path OR "xmin,ymin,xmax,ymax" bbox
   buffer: 5000                      # buffer in metres applied to AOI before download
 
-# UTM CRS for the study area (auto-detected from AOI centroid if omitted)
+# UTM CRS for the study area. Set null to auto-detect from AOI centroid.
 # Common values: EPSG:32749 (UTM 49N), EPSG:32750 (UTM 50S), EPSG:32754 (UTM 54S)
-crs: "EPSG:32750"
+crs: null
 
 cache_dir: cache/   # directory for cached raw downloads (shared across runs)
 

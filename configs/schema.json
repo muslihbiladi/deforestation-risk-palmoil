@@ -113,8 +113,8 @@
           "type": "object",
           "additionalProperties": false,
           "properties": {
-            "sigma_km": {"type": "number", "minimum": 0, "exclusiveMinimum": true},
-            "radius_km": {"type": "number", "minimum": 0, "exclusiveMinimum": true}
+            "sigma_km": {"type": "number", "exclusiveMinimum": 0},
+            "radius_km": {"type": "number", "exclusiveMinimum": 0}
           }
         },
         "sensitivity": {
@@ -123,7 +123,7 @@
           "properties": {
             "sigmas_km": {
               "type": "array",
-              "items": {"type": "number", "minimum": 0, "exclusiveMinimum": true}
+              "items": {"type": "number", "exclusiveMinimum": 0}
             }
           }
         }
@@ -140,7 +140,7 @@
         },
         "nsamp": {"type": "integer", "minimum": 1},
         "csize": {"type": "integer", "minimum": 1},
-        "Vbeta": {"type": "number", "minimum": 0, "exclusiveMinimum": true},
+        "Vbeta": {"type": "number", "exclusiveMinimum": 0},
         "burnin": {"type": "integer", "minimum": 1},
         "mcmc": {"type": "integer", "minimum": 1},
         "thin": {"type": "integer", "minimum": 1},
