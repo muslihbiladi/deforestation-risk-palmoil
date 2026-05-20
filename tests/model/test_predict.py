@@ -107,3 +107,22 @@ def test_classify_risk_all_below_first_threshold():
     arr = np.array([0.01, 0.05, 0.1])
     zones = classify_risk(arr, [0.2, 0.4, 0.6, 0.8])
     assert list(zones) == [1, 1, 1]
+
+
+def test_risk_raster_is_uint16_nodata_zero(tmp_path, write_raster):
+    """predict_risk must write UInt16 with NoData=0 (0=NoData, 1-65535=prob)."""
+    from palmdef_risk.model.predict import _write_risk_raster
+    import numpy as np
+    from osgeo import gdal
+    arr = np.random.uniform(0, 1, (10, 10)).astype(np.float32)
+    ref = write_raster(tmp_path / "ref.tif", np.ones((10, 10), dtype=np.uint8),
+                       gt=[500000, 30, 0, 9000300, 0, -30], epsg=32750)
+    out = tmp_path / "risk.tif"
+    _write_risk_raster(arr, str(ref), str(out))
+    ds = gdal.Open(str(out))
+    band = ds.GetRasterBand(1)
+    assert band.DataType == gdal.GDT_UInt16
+    assert band.GetNoDataValue() == 0
+    result = band.ReadAsArray()
+    assert result[result > 0].min() >= 1
+    ds = None

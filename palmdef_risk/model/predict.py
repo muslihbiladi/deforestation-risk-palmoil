@@ -77,3 +77,32 @@ def classify_risk(risk_array: np.ndarray, thresholds: list) -> np.ndarray:
     for i, t in enumerate(thresholds):
         out[risk_array > t] = i + 2
     return out
+
+
+def _write_risk_raster(
+    prob_arr: np.ndarray,
+    ref_tif: str,
+    out_tif: str,
+) -> None:
+    """Write probability [0,1] as UInt16. NoData=0, valid range=[1, 65535]."""
+    from osgeo import gdal
+    ds = gdal.Open(ref_tif)
+    gt = ds.GetGeoTransform()
+    proj = ds.GetProjection()
+    ny, nx = prob_arr.shape
+    ds = None
+
+    scaled = np.round(prob_arr * 65535).astype(np.uint16)
+    scaled = np.clip(scaled, 1, 65535)
+    scaled[prob_arr == 0.0] = 0
+
+    out_ds = gdal.GetDriverByName("GTiff").Create(
+        out_tif, nx, ny, 1, gdal.GDT_UInt16,
+        options=["COMPRESS=LZW", "TILED=YES"],
+    )
+    out_ds.SetGeoTransform(gt)
+    out_ds.SetProjection(proj)
+    out_ds.GetRasterBand(1).WriteArray(scaled)
+    out_ds.GetRasterBand(1).SetNoDataValue(0)
+    out_ds.FlushCache()
+    out_ds = None
