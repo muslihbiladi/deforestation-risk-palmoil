@@ -106,7 +106,7 @@ You need either:
 | File | Format | Description |
 |---|---|---|
 | `peatland.gpkg` | Vector polygon | Peatland extent. Binary (presence) or continuous (depth in metres) — set `type:` in config. |
-| `hgu.gpkg` | Vector polygon | Hydrological Geomorphic Unit concession polygons. Used to compute signed distance covariate. |
+| `hgu.gpkg` | Vector polygon | Hak Guna Usaha or concession polygons. Used to compute signed distance covariate. |
 
 ### 4.3 Optional user-supplied inputs
 
