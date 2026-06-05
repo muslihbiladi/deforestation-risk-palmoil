@@ -1,0 +1,24 @@
+.claude/
+.understand-anything/
+.vscode/
+cache/
+docs/
+notes/
+notebook_outputs/
+runs/
+palmdef_risk.egg-info/
+__pycache__/
+*.pyc
+
+# datasets
+data/*.gpkg
+data/*.tif
+data/*.tiff
+data/*.shp
+data/*.shx
+data/*.dbf
+data/*.prj
+data/*.geojson
+data/*.csv
+data/*.parquet
+data/*.nc
