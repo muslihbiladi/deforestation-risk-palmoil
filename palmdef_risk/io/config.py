@@ -33,10 +33,13 @@ class RunConfig:
     peatland_path: str
     peatland_type: str
     hgu_path: str
-    plantation_t2: str
+    plantation_t2: Optional[str]
     plantation_t3: Optional[str]
     plantation_industrial_value: int
     plantation_smallholder_value: int
+    river_path: Optional[str]
+    # GEE
+    gee_project: Optional[str]  # Google Earth Engine cloud project ID
     # Mill
     mill_source: str          # "trase" or "user"
     mill_path: Optional[str]  # required when source="user"
@@ -72,6 +75,7 @@ class RunConfig:
         peat = ui.get("peatland", {})
         hgu = ui.get("hgu", {})
         plant = ui.get("plantation", {})
+        riv = ui.get("river", {})
         proc = d.get("process", {})
         grav = proc.get("gravity", {})
         sens = proc.get("sensitivity", {})
@@ -96,10 +100,12 @@ class RunConfig:
             peatland_path=str(peat.get("path", "")),
             peatland_type=str(peat.get("type", "binary")),
             hgu_path=str(hgu.get("path", "")),
-            plantation_t2=str(plant.get("t2", "")),
+            plantation_t2=str(plant["t2"]) if plant.get("t2") else None,
             plantation_t3=str(plant["t3"]) if plant.get("t3") else None,
             plantation_industrial_value=int(plant.get("industrial_value", 1)),
             plantation_smallholder_value=int(plant.get("smallholder_value", 2)),
+            river_path=str(riv["path"]) if riv.get("path") else None,
+            gee_project=d.get("gee_project"),
             mill_source=str(d.get("mill", {}).get("source", "trase")),
             mill_path=d.get("mill", {}).get("path"),
             sigma_km=float(grav.get("sigma_km", 25.0)),

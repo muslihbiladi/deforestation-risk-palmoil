@@ -14,9 +14,9 @@ from osgeo import gdal, gdalconst
 import forestatrisk as far
 from palmdef_risk.io.run import RunContext
 from palmdef_risk.io.helpers import (
-    get_mask_properties, reproject_raster_to_match, reproject_vector,
-    rasterize_vector, apply_mask, apply_mask_float, remove_if_exists,
-    get_pixel_size_m,
+    get_mask_properties, reproject_raster, reproject_raster_to_match,
+    reproject_vector, rasterize_vector, apply_mask, apply_mask_float,
+    remove_if_exists, get_pixel_size_m,
 )
 
 log = logging.getLogger(__name__)
@@ -24,18 +24,148 @@ log = logging.getLogger(__name__)
 _PROTECTED_FILENAME = "protected"   # never "pa" — causes patsy formula errors
 
 
-def align_all(ctx: RunContext, inputs: dict) -> dict[str, Path]:
+def _ensure_forest_utm(ctx: RunContext) -> None:
+    """Reproject raw/forest/*.tif from EPSG:4326 to UTM in-place if needed.
+
+    The GEE download writes EPSG:4326 when output_crs was None at download
+    time. This self-heals that run by reprojecting before align copies files.
+    The resulting shape change cascades to invalidate all downstream rasters
+    (distances, gravity) via the existing shape-mismatch checks.
+    """
+    if not ctx.config.crs:
+        return
+    ref = ctx.raw_dir / "forest" / "forest_t2.tif"
+    if not ref.exists():
+        return
+    ds = gdal.Open(str(ref))
+    if ds is None:
+        return
+    gt = ds.GetGeoTransform()
+    ds = None
+    if abs(gt[1]) >= 1.0:
+        return  # already in projected CRS (metres)
+
+    log.warning(
+        "Forest rasters are EPSG:4326 — reprojecting to %s in-place",
+        ctx.config.crs,
+    )
+    forest_dir = ctx.raw_dir / "forest"
+    for fname in [
+        "forest_cover.tif", "forest_t1.tif", "forest_t2.tif", "forest_t3.tif",
+        "fcc12.tif", "fcc23.tif", "fcc123.tif",
+    ]:
+        src = forest_dir / fname
+        if not src.exists():
+            continue
+        tmp = forest_dir / f"{src.stem}_4326_tmp.tif"
+        src.rename(tmp)
+        reproject_raster(str(tmp), str(src), target_crs=ctx.config.crs,
+                         resample_alg="near")
+        tmp.unlink()
+        log.info("  Reprojected raw forest: %s → %s", fname, ctx.config.crs)
+
+
+def _remap_srtm_voids(path: str, nodata: float = -9999.0) -> None:
+    """Replace SRTM void sentinel (-32768) that leaks through bilinear reprojection."""
+    ds = gdal.Open(path, gdal.GA_Update)
+    arr = ds.GetRasterBand(1).ReadAsArray().astype(np.float32)
+    arr[arr < -9000] = nodata  # -32768 and any near-sentinel bleed from bilinear
+    ds.GetRasterBand(1).WriteArray(arr)
+    ds.GetRasterBand(1).SetNoDataValue(nodata)
+    ds.FlushCache()
+    ds = None
+
+
+def _discover_inputs(ctx: RunContext) -> dict:
+    """Build an inputs dict by scanning ctx.raw_dir when no dict is passed."""
+    ui = ctx.raw_dir / "user_inputs"
+    d: dict = {}
+    for name in ("peatland", "hgu", "river"):
+        for ext in (".gpkg", ".tif", ".shp"):
+            p = ui / f"{name}{ext}"
+            if p.exists():
+                d[name] = p
+                break
+    for name in ("plantation_t2", "plantation_t3"):
+        for ext in (".tif", ".gpkg"):
+            p = ui / f"{name}{ext}"
+            if p.exists():
+                d[name] = p
+                break
+    mill = ctx.raw_dir / "mill" / "mill_t2.gpkg"
+    if mill.exists():
+        d["mill"] = mill
+    return d
+
+
+def align_all(ctx: RunContext, inputs: dict | None = None, force: bool = False) -> dict[str, Path]:
     """Align all raw inputs to the reference raster (forest_t2.tif).
 
     `inputs` is the merged dict from download_forest(), download_variables(),
-    download_mill(), and ingest_user_inputs().
+    download_mill(), and ingest_user_inputs(). When omitted, files are
+    auto-discovered from ctx.raw_dir (useful when resuming in notebook 02).
+
+    Skips any output that already exists unless force=True.
 
     Returns dict mapping variable names to aligned raster paths in ctx.data_dir.
     """
+    def _raster_shape(p: Path):
+        ds = gdal.Open(str(p))
+        if ds is None:
+            return None
+        s = (ds.RasterYSize, ds.RasterXSize)
+        ds = None
+        return s
+
+    def _skip(p: Path, src: Path | None = None) -> bool:
+        if not force and p.exists():
+            if src is not None and src.exists():
+                if _raster_shape(p) != _raster_shape(src):
+                    log.warning(
+                        "  %s shape mismatch vs source — overwriting", p.name)
+                    p.unlink()
+                    return False
+            log.info("  skip (exists): %s", p.name)
+            return True
+        return False
+
+    _ensure_forest_utm(ctx)
+
+    # After forest reprojection to UTM, purge any data-dir rasters that are
+    # still in EPSG:4326 (pixel < 1°) or have wrong shape. This triggers
+    # re-alignment for altitude, slope, road, etc. whose raw source is also
+    # in 4326 (so the shape-mismatch check against source would not catch them).
+    _ref_path = ctx.raw_dir / "forest" / "forest_t2.tif"
+    _ref_ds = gdal.Open(str(_ref_path))
+    if _ref_ds is not None:
+        _ref_gt = _ref_ds.GetGeoTransform()
+        _ref_shape = (_ref_ds.RasterYSize, _ref_ds.RasterXSize)
+        _ref_ds = None
+        if abs(_ref_gt[1]) >= 1.0:  # reference is UTM (metres)
+            for _tif in list(ctx.data_dir.glob("*.tif")):
+                try:
+                    _ds = gdal.Open(str(_tif))
+                except Exception:
+                    _ds = None
+                if _ds is None:
+                    log.warning("Deleting corrupt raster: %s", _tif.name)
+                    _tif.unlink()
+                    continue
+                _gt = _ds.GetGeoTransform()
+                _shape = (_ds.RasterYSize, _ds.RasterXSize)
+                _ds = None
+                if _shape != _ref_shape or abs(_gt[1]) < 1.0:
+                    log.info("Deleting stale raster (shape/CRS mismatch): %s", _tif.name)
+                    _tif.unlink()
+
+    if inputs is None or isinstance(inputs, Path):
+        inputs = _discover_inputs(ctx)
     raw_forest = ctx.raw_dir / "forest"
     ref_file = raw_forest / "forest_t2.tif"
     if not ref_file.exists():
         raise FileNotFoundError(f"Reference raster not found: {ref_file}")
+
+    (ctx.data_dir / "intermediate").mkdir(parents=True, exist_ok=True)
 
     mask_props = get_mask_properties(str(ref_file))
     result: dict[str, Path] = {}
@@ -45,7 +175,8 @@ def align_all(ctx: RunContext, inputs: dict) -> dict[str, Path]:
         src = raw_forest / f"{name}.tif"
         if src.exists():
             dst = ctx.data_dir / f"{name}.tif"
-            shutil.copy2(src, dst)
+            if not _skip(dst, src=src):
+                shutil.copy2(src, dst)
             result[name] = dst
 
     # 2. Align SRTM (altitude + slope) — Float32
@@ -53,84 +184,99 @@ def align_all(ctx: RunContext, inputs: dict) -> dict[str, Path]:
         raw_path = ctx.raw_dir / "variables" / f"{name}.tif"
         if raw_path.exists():
             out = ctx.data_dir / f"{name}.tif"
-            reproject_raster_to_match(str(raw_path), str(out), mask_props,
-                                      resample_alg="bilinear")
-            apply_mask_float(str(out), mask_props["invalid_mask"])
+            if not _skip(out):
+                reproject_raster_to_match(str(raw_path), str(out), mask_props,
+                                          resample_alg="bilinear")
+                apply_mask_float(str(out), mask_props["invalid_mask"])
+                if name == "altitude":
+                    _remap_srtm_voids(str(out))
             result[name] = out
 
     # 3. Rasterize vectors — Byte
     vec_dir = ctx.raw_dir / "variables"
     for name, burn in [(_PROTECTED_FILENAME, 1), ("road", 1), ("river", 1), ("town", 1)]:
-        vec_path = _find_vector(vec_dir, name)
+        # User-supplied river overrides the OSM download
+        vec_path = (inputs.get("river") or _find_vector(vec_dir, name)) if name == "river" \
+            else _find_vector(vec_dir, name)
         if vec_path:
-            proj_vec = ctx.data_dir / "intermediate" / f"{name}_proj.gpkg"
-            reproject_vector(str(vec_path), str(proj_vec), mask_props["srs"])
             out = ctx.data_dir / f"{name}.tif"
-            rasterize_vector(str(proj_vec), str(out), burn, mask_props)
-            apply_mask(str(out), mask_props["invalid_mask"])
+            if not _skip(out):
+                proj_vec = ctx.data_dir / "intermediate" / f"{name}_proj.gpkg"
+                vec_to_burn = reproject_vector(str(vec_path), str(proj_vec), mask_props["srs"])
+                rasterize_vector(str(vec_to_burn), str(out), burn, mask_props)
+                apply_mask(str(out), mask_props["invalid_mask"])
             result[name] = out
 
     # 4. Peatland — branch on type
     peat_src = inputs.get("peatland")
     if peat_src:
         out = ctx.data_dir / "peatland.tif"
-        if ctx.config.peatland_type == "binary":
-            proj_peat = ctx.data_dir / "intermediate" / "peatland_proj.gpkg"
-            reproject_vector(str(peat_src), str(proj_peat), mask_props["srs"])
-            rasterize_vector(str(proj_peat), str(out), 1, mask_props)
-            apply_mask(str(out), mask_props["invalid_mask"])
-        else:
-            reproject_raster_to_match(str(peat_src), str(out), mask_props,
-                                      resample_alg="bilinear")
-            apply_mask_float(str(out), mask_props["invalid_mask"])
+        if not _skip(out):
+            if ctx.config.peatland_type == "binary":
+                proj_peat = ctx.data_dir / "intermediate" / "peatland_proj.gpkg"
+                peat_to_burn = reproject_vector(str(peat_src), str(proj_peat), mask_props["srs"])
+                rasterize_vector(str(peat_to_burn), str(out), 1, mask_props)
+                apply_mask(str(out), mask_props["invalid_mask"])
+            else:
+                reproject_raster_to_match(str(peat_src), str(out), mask_props,
+                                          resample_alg="bilinear")
+                apply_mask_float(str(out), mask_props["invalid_mask"])
         result["peatland"] = out
 
     # 5. HGU signed-distance raster
     hgu_src = inputs.get("hgu")
     if hgu_src:
-        compute_hgu_signed_distance(
-            hgu_gpkg=str(hgu_src),
-            ref_tif=str(ref_file),
-            out_tif=str(ctx.data_dir / "hgu_signed_dist.tif"),
-        )
-        result["hgu_signed_dist"] = ctx.data_dir / "hgu_signed_dist.tif"
+        out = ctx.data_dir / "hgu_signed_dist.tif"
+        if not _skip(out):
+            compute_hgu_signed_distance(
+                hgu_gpkg=str(hgu_src),
+                ref_tif=str(ref_file),
+                out_tif=str(out),
+            )
+        result["hgu_signed_dist"] = out
 
     # 6. Plantation — merge two classes → single presence raster
     plant_t2 = inputs.get("plantation_t2")
     if plant_t2:
-        merged = ctx.data_dir / "intermediate" / "plantation_merged.tif"
-        merge_plantation(str(plant_t2), str(merged),
-                         ctx.config.plantation_industrial_value,
-                         ctx.config.plantation_smallholder_value)
         out = ctx.data_dir / "plantation.tif"
-        reproject_raster_to_match(str(merged), str(out), mask_props,
-                                  resample_alg="near",
-                                  output_dtype=gdalconst.GDT_Byte)
-        apply_mask(str(out), mask_props["invalid_mask"])
+        if not _skip(out):
+            merged = ctx.data_dir / "intermediate" / "plantation_merged.tif"
+            merge_plantation(str(plant_t2), str(merged),
+                             ctx.config.plantation_industrial_value,
+                             ctx.config.plantation_smallholder_value)
+            reproject_raster_to_match(str(merged), str(out), mask_props,
+                                      resample_alg="near",
+                                      output_dtype=gdalconst.GDT_Byte)
+            apply_mask(str(out), mask_props["invalid_mask"])
         result["plantation"] = out
 
     # 7. Mill — rasterize presence raster
     mill_gpkg = inputs.get("mill")
     if mill_gpkg:
-        proj_mill = ctx.data_dir / "intermediate" / "mill_proj.gpkg"
-        reproject_vector(str(mill_gpkg), str(proj_mill), mask_props["srs"])
         out = ctx.data_dir / "mill.tif"
-        rasterize_vector(str(proj_mill), str(out), 1, mask_props)
-        apply_mask(str(out), mask_props["invalid_mask"])
+        if not _skip(out):
+            proj_mill = ctx.data_dir / "intermediate" / "mill_proj.gpkg"
+            mill_to_burn = reproject_vector(str(mill_gpkg), str(proj_mill), mask_props["srs"])
+            rasterize_vector(str(mill_to_burn), str(out), 1, mask_props)
+            apply_mask(str(out), mask_props["invalid_mask"])
         result["mill"] = out
 
     return result
 
 
-def compute_all_distances(ctx: RunContext) -> dict[str, Path]:
+def compute_all_distances(ctx: RunContext, force: bool = False) -> dict[str, Path]:
     """Compute all distance rasters via forestatrisk.data.compute.compute_distance().
 
     Reads aligned rasters from ctx.data_dir. Writes dist_*.tif back to ctx.data_dir.
+    Skips any dist_*.tif that already exists unless force=True.
     """
     d = ctx.data_dir
     result: dict[str, Path] = {}
 
     def _dist(input_file: Path, dist_file: Path, values: int = 0) -> Path:
+        if not force and dist_file.exists():
+            log.info("  skip (exists): %s", dist_file.name)
+            return dist_file
         log.info("  Computing distance: %s", dist_file.name)
         far.data.compute.compute_distance(
             input_file=str(input_file),

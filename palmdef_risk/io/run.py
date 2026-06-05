@@ -3,9 +3,29 @@ from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 import logging
+import os
+import sys
 import shutil
 
 from palmdef_risk.io.config import RunConfig
+
+
+def _fix_proj_path() -> None:
+    """Override stale PROJ db (e.g. from PostgreSQL/PostGIS) with the one
+    from the active Python environment.  Safe no-op if the db is not found.
+    """
+    candidates = [
+        Path(sys.prefix) / "Library" / "share" / "proj",   # Windows conda
+        Path(sys.exec_prefix) / "Library" / "share" / "proj",
+        Path(sys.prefix) / "share" / "proj",                # Linux/macOS conda
+        Path(sys.exec_prefix) / "share" / "proj",
+    ]
+    for proj_dir in candidates:
+        if (proj_dir / "proj.db").exists():
+            os.environ["PROJ_LIB"] = str(proj_dir)
+            os.environ["PROJ_DATA"] = str(proj_dir)
+            logging.getLogger(__name__).debug("PROJ path set to %s", proj_dir)
+            return
 
 
 @dataclass
@@ -35,6 +55,7 @@ _SUBDIRS = [
     "data/raw/variables",
     "data/raw/mill",
     "data/raw/user_inputs",
+    "data/intermediate",
     "output/models",
     "output/diagnostics",
     "output/predictions",
@@ -48,6 +69,7 @@ def create_run(
     runs_root: str | Path = "runs",
     dry_run: bool = False,
 ) -> RunContext:
+    _fix_proj_path()
     config_path = Path(config_path)
     config = RunConfig.from_yaml(config_path)
 
@@ -89,13 +111,55 @@ def create_run(
     return ctx
 
 
+def create_or_resume_run(
+    config_path: str | Path,
+    resume: bool = False,
+    runs_root: str | Path = "runs",
+) -> RunContext:
+    """Create a new run or resume the most recent matching one.
+
+    When resume=True, searches runs_root for the most recently modified folder
+    whose name starts with ``project_area_task_`` (from the config).  If a
+    match is found that folder is reloaded; otherwise a new run is created.
+    When resume=False (default), always creates a fresh timestamped folder.
+    """
+    if resume:
+        cfg_tmp = RunConfig.from_yaml(config_path)
+        prefix = f"{cfg_tmp.project}_{cfg_tmp.area}_{cfg_tmp.task}_"
+        runs_root_path = Path(runs_root)
+        if runs_root_path.exists():
+            candidates = sorted(
+                [p for p in runs_root_path.iterdir()
+                 if p.is_dir() and p.name.startswith(prefix)],
+                key=lambda p: p.stat().st_mtime,
+                reverse=True,
+            )
+            if candidates:
+                run_dir = candidates[0]
+                logging.getLogger(__name__).info("Resuming run: %s", run_dir)
+                print(f"Resuming existing run: {run_dir.name}")
+                return load_run(run_dir)
+        logging.getLogger(__name__).warning(
+            "No existing run found matching '%s*', creating new run.", prefix
+        )
+        print(f"No existing run found for '{prefix}*', creating new run.")
+    return create_run(config_path, runs_root=runs_root)
+
+
 def load_run(run_dir: str | Path | None = None) -> RunContext:
+    _fix_proj_path()
     if run_dir is None:
         run_dir = _prompt_run_selection()
     run_dir = Path(run_dir)
     if not (run_dir / "config.yaml").exists():
         raise FileNotFoundError(f"No config.yaml in {run_dir}")
     config = RunConfig.from_yaml(run_dir / "config.yaml")
+    if config.crs is None:
+        from palmdef_risk.data.utm import primary_utm_zone
+        from palmdef_risk.io.helpers import aoi_bbox_4326
+        bbox = aoi_bbox_4326(config.aoi_source)
+        config.crs = primary_utm_zone(bbox)
+        logging.getLogger(__name__).info("Auto-detected CRS: %s", config.crs)
     return RunContext(run_dir=run_dir, config=config)
 
 

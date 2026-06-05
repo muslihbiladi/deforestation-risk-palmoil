@@ -28,6 +28,10 @@
       "type": ["string", "null"],
       "description": "UTM CRS (e.g. EPSG:32750). Auto-detected from AOI centroid if omitted."
     },
+    "gee_project": {
+      "type": ["string", "null"],
+      "description": "Google Earth Engine cloud project ID (e.g. 'ee-myusername')."
+    },
     "cache_dir": {
       "type": "string",
       "description": "Directory for cached raw downloads shared across runs."
@@ -92,6 +96,13 @@
             "t3": {"type": ["string", "null"]},
             "industrial_value": {"type": "integer"},
             "smallholder_value": {"type": "integer"}
+          }
+        },
+        "river": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "path": {"type": ["string", "null"]}
           }
         }
       }

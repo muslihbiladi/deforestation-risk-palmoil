@@ -814,12 +814,20 @@ def get_wdpa(aoi, output_dir="data", buff=0.0, output_crs=None,
         if verbose:
             print(f"  WARNING: clip step skipped ({e})")
 
-    # Reproject if requested
+    # Reproject if requested (geopandas path avoids OGR exception under gdal.UseExceptions())
     if output_crs is not None and os.path.exists(pa_path):
-        tmp = pa_path.replace(".gpkg", "_4326.gpkg")
-        os.rename(pa_path, tmp)
-        _reproject_vector(tmp, pa_path, output_crs, verbose=verbose)
-        os.remove(tmp)
+        try:
+            gdf_proj = gpd.read_file(pa_path).to_crs(output_crs)
+            os.remove(pa_path)
+            if not gdf_proj.empty:
+                gdf_proj.to_file(pa_path, driver="GPKG")
+            else:
+                _create_empty_gpkg(pa_path, ogr.wkbMultiPolygon)
+            if verbose:
+                print(f"  Reprojected {_WDPA_OUTPUT_NAME} → {output_crs}")
+        except Exception as e:
+            if verbose:
+                print(f"  WARNING: reprojection failed ({e}) — output stays in EPSG:4326")
 
     if verbose:
         print(f"  {_WDPA_OUTPUT_NAME} : {pa_path}")
@@ -1228,25 +1236,111 @@ def get_variables(aoi, output_dir="data", buff=0.0,
 from palmdef_risk.io.run import RunContext
 
 
+def _variables_complete(out_dir, cfg) -> bool:
+    """Return True only when all expected variable outputs are present."""
+    required = [
+        out_dir / "altitude.tif",
+        out_dir / "slope.tif",
+        out_dir / f"{_WDPA_OUTPUT_NAME}.gpkg",
+        out_dir / "road.gpkg",
+    ]
+    # river: skip check if user supplies their own file
+    if not getattr(cfg, "river_path", None):
+        required.append(out_dir / "river.gpkg")
+    # town: OSM point file OR both GHSL rasters
+    if cfg.use_ghsl_towns:
+        required += [out_dir / "ghsl_built_t2.tif", out_dir / "ghsl_built_t3.tif"]
+    else:
+        required.append(out_dir / "town.gpkg")
+    return all(p.exists() for p in required)
+
+
 def download_variables(ctx: RunContext, use_cache: bool = True) -> dict:
-    """Download all spatial covariates for this run.
+    """Download spatial covariates for this run, skipping files that already exist.
 
     Reads parameters from ctx.config. Writes to ctx.raw_dir/variables/.
-    Returns the same dict as get_variables().
+    Each dataset (SRTM, WDPA, roads, rivers, towns/GHSL) is checked and
+    downloaded independently so partial runs resume without re-downloading
+    already-present outputs.
     """
     cfg = ctx.config
     out_dir = ctx.raw_dir / "variables"
 
-    return get_variables(
-        aoi=cfg.aoi_source,
-        output_dir=str(out_dir),
-        buff=cfg.aoi_buffer,
-        output_crs=cfg.crs,
-        crop_to_aoi=True,
-        parallel=True,
-        max_retries=3,
-        osm_timeout=cfg.osm_timeout,
-        use_ghsl_towns=cfg.use_ghsl_towns,
-        ghsl_years=cfg.ghsl_years,
-        verbose=True,
+    if use_cache and _variables_complete(out_dir, cfg):
+        print("Variables: all outputs already present in run folder, skipping.")
+        return {}
+
+    # aoi_buffer is in metres; individual getters expect degrees
+    buff_deg = cfg.aoi_buffer / 111_320.0
+    osm_kwargs = dict(
+        aoi=cfg.aoi_source, output_dir=str(out_dir), buff=buff_deg,
+        output_crs=cfg.crs, timeout=cfg.osm_timeout, verbose=True,
     )
+    gee_kwargs = dict(
+        aoi=cfg.aoi_source, output_dir=str(out_dir), buff=buff_deg,
+        output_crs=cfg.crs, crop_to_aoi=True, parallel=True,
+        max_retries=3, verbose=True,
+    )
+
+    result = {}
+    needs_gee = (
+        not (out_dir / "altitude.tif").exists()
+        or not (out_dir / "slope.tif").exists()
+        or not (out_dir / f"{_WDPA_OUTPUT_NAME}.gpkg").exists()
+    )
+    if needs_gee:
+        ee.Initialize(
+            project=cfg.gee_project,
+            opt_url="https://earthengine-highvolume.googleapis.com",
+        )
+
+    # SRTM — skip if both outputs present
+    if not (out_dir / "altitude.tif").exists() or not (out_dir / "slope.tif").exists():
+        result.update(get_srtm(**gee_kwargs))
+    else:
+        print("Variables: altitude + slope already present, skipping SRTM.")
+
+    # WDPA — skip if present
+    if not (out_dir / f"{_WDPA_OUTPUT_NAME}.gpkg").exists():
+        result.update(get_wdpa(
+            aoi=cfg.aoi_source, output_dir=str(out_dir), buff=buff_deg,
+            output_crs=cfg.crs, verbose=True,
+        ))
+    else:
+        print(f"Variables: {_WDPA_OUTPUT_NAME}.gpkg already present, skipping WDPA.")
+
+    # Roads — skip if present
+    if not (out_dir / "road.gpkg").exists():
+        result.update(get_roads(**osm_kwargs))
+    else:
+        print("Variables: road.gpkg already present, skipping roads.")
+
+    # Rivers — skip if user-supplied or already present
+    if getattr(cfg, "river_path", None):
+        print("Variables: user-supplied river configured, skipping OSM river.")
+    elif not (out_dir / "river.gpkg").exists():
+        result.update(get_rivers(**osm_kwargs))
+    else:
+        print("Variables: river.gpkg already present, skipping rivers.")
+
+    # Towns / GHSL
+    if cfg.use_ghsl_towns:
+        if not cfg.ghsl_years or len(cfg.ghsl_years) != 2:
+            raise ValueError("variables.ghsl_years=[t2, t3] required when use_ghsl_towns: true")
+        if (not (out_dir / "ghsl_built_t2.tif").exists()
+                or not (out_dir / "ghsl_built_t3.tif").exists()):
+            result.update(get_ghsl(
+                aoi=cfg.aoi_source, years=cfg.ghsl_years,
+                output_dir=str(out_dir), buff=buff_deg,
+                output_crs=cfg.crs, crop_to_aoi=True,
+                parallel=True, max_retries=3, verbose=True,
+            ))
+        else:
+            print("Variables: ghsl_built_t2/t3.tif already present, skipping GHSL.")
+    else:
+        if not (out_dir / "town.gpkg").exists():
+            result.update(get_towns(**osm_kwargs))
+        else:
+            print("Variables: town.gpkg already present, skipping towns.")
+
+    return result

@@ -80,15 +80,24 @@ def test_project_future_calls_far_deforest(tmp_path):
     ctx = _FakeCtx(tmp_path)
     ctx.config.project_future = True
     ctx.config.projection_year = 2030
-    ctx.config.forest_years = [2010, 2020, 2023]
+    ctx.config.forest_years = [2010, 2020, 2023]  # span t2→t3 = 3 yr, projection 7 yr
+    (ctx.data_dir / "forest_t2.tif").write_bytes(b"")
+    (ctx.data_dir / "forest_t3.tif").write_bytes(b"")
     risk_path = tmp_path / "risk_A.tif"
 
-    with patch("forestatrisk.deforest") as mock_def:
+    # Historical loss 30,000 ha over 3 yr → 10,000 ha/yr → 70,000 ha for 7-yr projection.
+    countpix_side_effect = [{"area": 100_000.0}, {"area": 70_000.0}]
+    with patch("forestatrisk.countpix", side_effect=countpix_side_effect), \
+         patch("forestatrisk.deforest", return_value={"threshold": 32000, "error_perc": 0.1}) as mock_def:
         result = project_future(ctx, risk_path, "A")
 
     mock_def.assert_called_once()
     call_kwargs = mock_def.call_args.kwargs
-    assert call_kwargs["time_interval"] == 7  # 2030 - 2023
+    assert call_kwargs["input_raster"] == str(risk_path)
+    assert call_kwargs["hectares"] == pytest.approx(70_000.0)
+    assert call_kwargs["output_file"] == str(
+        ctx.output_dir / "predictions" / "forest_future_A.tif"
+    )
     assert result == ctx.output_dir / "predictions" / "forest_future_A.tif"
 
 

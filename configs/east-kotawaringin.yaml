@@ -6,36 +6,35 @@
 # ──────────────────────────────────────────────────────────────────────────────
 
 run:
-  project: myproject          # short slug used in run folder name
-  area: kalimantan            # study area label
+  project: wri          # short slug used in run folder name
+  area: east-kotawaringin            # study area label
   task: baseline              # task label (e.g. baseline, scenario_a)
 
 aoi:
-  source: data/aoi/study_area.gpkg  # vector file path OR "xmin,ymin,xmax,ymax" bbox
-  buffer: 5000                      # buffer in metres applied to AOI before download
+  source: data/AOI_reprojected.gpkg  # vector file path OR "xmin,ymin,xmax,ymax" bbox
+  buffer: 500                      # buffer in metres applied to AOI before download
 
-# UTM CRS for the study area. Set null to auto-detect from AOI centroid.
+# UTM CRS for the study area (auto-detected from AOI centroid if omitted)
 # Common values: EPSG:32749 (UTM 49N), EPSG:32750 (UTM 50S), EPSG:32754 (UTM 54S)
 crs: null
 
-# Google Earth Engine cloud project ID — required for GEE downloads (forest + variables).
-# Find your project at https://console.cloud.google.com or run: earthengine ls
-# Example: "ee-myusername"   or   "myorg-gee-project"
-gee_project: null
+# Google Earth Engine cloud project ID — required for GEE downloads.
+# Replace with your actual project ID (e.g. "ee-myusername").
+gee_project: personal-research-462915
 
 cache_dir: cache/   # directory for cached raw downloads (shared across runs)
 
 # ── Forest data ──────────────────────────────────────────────────────────────
 forest:
   source: tmf                  # "tmf" (JRC Tropical Moist Forest) or "gfc" (Hansen GFC)
-  years: [2015, 2020, 2024]    # [t1, t2, t3]; t2 = reference year, t3 = forecast start
-  perc: 75                     # tree-cover threshold % (gfc only; ignored for tmf)
+  years: [2001, 2012, 2024]    # [t1, t2, t3]; t2 = reference year, t3 = forecast start
+  perc: 30                     # tree-cover threshold % (gfc only; ignored for tmf)
 
 # ── Covariate downloads ───────────────────────────────────────────────────────
 variables:
-  use_ghsl_towns: false         # true → GHSL built-up surface instead of OSM towns
-  ghsl_years: null              # required when use_ghsl_towns: true, e.g. [2020, 2024]
-  osm_timeout: 180              # OSM query timeout in seconds
+  use_ghsl_towns: true         # true → GHSL built-up surface instead of OSM towns
+  ghsl_years: [2020, 2025]              # required when use_ghsl_towns: true, e.g. [2020, 2024]
+  osm_timeout: 730              # OSM query timeout in seconds
 
 # ── User-supplied spatial inputs ─────────────────────────────────────────────
 user_inputs:
@@ -45,7 +44,7 @@ user_inputs:
   hgu:
     path: data/user_inputs/hgu.gpkg        # HGU (hydrological geomorphic unit) polygons
   plantation:
-    t2: data/user_inputs/plantation_t2.tif  # plantation raster at t2 date (reference year)
+    t2: null  # plantation raster at t2 date (reference year)
     t3: null                                # plantation raster at t3 date (optional)
     industrial_value: 1                     # pixel value for industrial plantation class
     smallholder_value: 2                    # pixel value for smallholder plantation class
@@ -73,18 +72,18 @@ model:
   Vbeta: 1000           # prior variance for fixed effects (> 100 may cause divergence)
   burnin: 1000          # MCMC burn-in iterations
   mcmc: 1000            # MCMC sampling iterations after burn-in
-  thin: 1               # MCMC thinning interval (keep every n-th sample)
+  thin: 5               # MCMC thinning interval (keep every n-th sample)
   seed: 42              # random seed for reproducibility
 
 # ── Parallel execution ────────────────────────────────────────────────────────
 parallel:
   max_workers: null        # null = auto (governed by cpu_fraction + RAM constraints)
-  cpu_fraction: 0.9        # fraction of logical CPUs to use
-  ram_per_dist_gb: 0.5     # expected RAM per distance-computation task (GB)
-  ram_per_icar_gb: 1.0     # expected RAM per iCAR model fit (GB)
-  ram_per_predict_gb: 0.75 # expected RAM per prediction task (GB)
+  cpu_fraction: 0.8        # fraction of logical CPUs to use
+  ram_per_dist_gb: 1.0     # expected RAM per distance-computation task (GB)
+  ram_per_icar_gb: 1.5     # expected RAM per iCAR model fit (GB)
+  ram_per_predict_gb: 1.5 # expected RAM per prediction task (GB)
 
 # ── Output options ────────────────────────────────────────────────────────────
 output:
-  project_future: false     # true → project future forest cover to projection_year
+  project_future: true     # true → project future forest cover to projection_year
   projection_year: 2025     # target year (must exceed forest.years[-1])

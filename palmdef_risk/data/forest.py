@@ -257,7 +257,7 @@ def ee_gfc(years, perc=75):
     :param perc: Tree cover percentage threshold (default: 75).
     :return: ee.Image with one band per year (uint8: 1=forest, 0=non-forest).
     """
-    gfc = ee.Image("UMD/hansen/global_forest_change_2024_v1_12")
+    gfc = ee.Image("UMD/hansen/global_forest_change_2025_v1_13")
     treecover = gfc.select(["treecover2000"])
     lossyear = gfc.select(["lossyear"])
 
@@ -1101,13 +1101,25 @@ def download_forest(ctx: RunContext, use_cache: bool = True) -> dict:
     """
     cfg = ctx.config
     out_dir = ctx.raw_dir / "forest"
+
+    if use_cache and (out_dir / "fcc23.tif").exists():
+        print("Forest: outputs already present in run folder, skipping.")
+        return {"forest_cover": str(out_dir / "forest_cover.tif")}
+
+    ee.Initialize(
+        project=cfg.gee_project,
+        opt_url="https://earthengine-highvolume.googleapis.com",
+    )
     out_dir.mkdir(parents=True, exist_ok=True)
+
+    # aoi_buffer is in metres; get_fcc expects degrees (~111 320 m/deg at equator)
+    buff_deg = cfg.aoi_buffer / 111_320.0
 
     return get_fcc(
         aoi=cfg.aoi_source,
         years=cfg.forest_years,
         source=cfg.forest_source,
-        buff=cfg.aoi_buffer,
+        buff=buff_deg,
         perc=cfg.forest_perc,
         output_file=str(out_dir / "forest_cover.tif"),
         output_crs=ctx.config.crs,

@@ -5,7 +5,7 @@ from typing import TYPE_CHECKING
 
 import numpy as np
 from osgeo import gdal
-from scipy.ndimage import gaussian_filter
+from scipy.fft import rfft2, irfft2
 
 if TYPE_CHECKING:
     from palmdef_risk.io.run import RunContext
@@ -19,7 +19,11 @@ def _apply_gaussian_filter(
     sigma_km: float,
     radius_km: float,
 ) -> None:
-    """Gaussian kernel accessibility: convolution of mill density with Gaussian kernel."""
+    """Gaussian kernel accessibility: FFT convolution of mill density with Gaussian kernel.
+
+    Uses rfft2/irfft2 (O(N log N)) rather than spatial convolution (O(N * sigma_px)),
+    which is ~100-200x faster when sigma spans hundreds of pixels.
+    """
     ds = gdal.Open(str(mill_raster))
     arr = ds.GetRasterBand(1).ReadAsArray().astype(np.float32)
     gt = ds.GetGeoTransform()
@@ -28,12 +32,20 @@ def _apply_gaussian_filter(
     ds = None
 
     sigma_px = (sigma_km * 1000.0) / pixel_size_m
-    truncate = radius_km * 1000.0 / (sigma_km * 1000.0)
 
-    result = gaussian_filter(arr.astype(float), sigma=sigma_px,
-                             truncate=truncate).astype(np.float32)
+    ny, nx = arr.shape
+    fy = np.fft.fftfreq(ny).astype(np.float64)[:, np.newaxis]
+    fx = np.fft.rfftfreq(nx).astype(np.float64)[np.newaxis, :]
+    kernel_f = np.exp(-2.0 * np.pi ** 2 * sigma_px ** 2 * (fy ** 2 + fx ** 2))
 
-    ny, nx = result.shape
+    arr_f = rfft2(arr.astype(np.float64))
+    arr_f *= kernel_f
+    result = np.clip(irfft2(arr_f, s=(ny, nx)), 0.0, None).astype(np.float32)
+
+    logger.info(
+        "Gaussian filter applied (FFT): sigma=%.1f km (%.0f px), raster=%dx%d",
+        sigma_km, sigma_px, nx, ny,
+    )
     out_ds = gdal.GetDriverByName("GTiff").Create(
         str(out_path), nx, ny, 1, gdal.GDT_Float32,
         options=["COMPRESS=LZW", "TILED=YES"],
@@ -105,30 +117,190 @@ def orthogonalize_gravity(
     return r2
 
 
-def compute_gravity_accessibility(ctx: "RunContext") -> Path:
-    """Rasterize mill_t2.gpkg, apply Gaussian filter → data/gravity_raw.tif."""
-    from palmdef_risk.io.helpers import get_mask_properties, rasterize_vector
+def _rasterize_points_numpy(points_gpkg: Path, ref_path: Path, out_path: Path) -> int:
+    """Burn point features into a Float32 raster via pixel-index arithmetic.
+
+    Bypasses gdal.RasterizeLayer, which silently produces all-zero output for
+    sparse point data in some GDAL/OGR builds. Handles both Point and MultiPoint.
+    Returns the number of points burned into the grid.
+    """
+    from osgeo import ogr
+
+    ds = gdal.Open(str(ref_path))
+    gt = ds.GetGeoTransform()
+    proj = ds.GetProjection()
+    nx, ny = ds.RasterXSize, ds.RasterYSize
+    ds = None
+
+    arr = np.zeros((ny, nx), dtype=np.float32)
+
+    vec_ds = ogr.Open(str(points_gpkg))
+    if vec_ds is None:
+        logger.warning("Cannot open mill file for rasterization: %s", points_gpkg)
+        return 0
+
+    layer = vec_ds.GetLayer()
+    n_burned = 0
+    for feat in layer:
+        geom = feat.GetGeometryRef()
+        if geom is None:
+            continue
+        sub_geoms = (
+            [geom.GetGeometryRef(i) for i in range(geom.GetGeometryCount())]
+            if geom.GetGeometryCount() > 0
+            else [geom]
+        )
+        for pt in sub_geoms:
+            col = int((pt.GetX() - gt[0]) / gt[1])
+            row = int((pt.GetY() - gt[3]) / gt[5])
+            if 0 <= row < ny and 0 <= col < nx:
+                arr[row, col] = 1.0
+                n_burned += 1
+    vec_ds = None
+
+    logger.info("Burned %d mill point(s) into density raster from %s", n_burned, points_gpkg.name)
+
+    out_ds = gdal.GetDriverByName("GTiff").Create(
+        str(out_path), nx, ny, 1, gdal.GDT_Float32,
+        options=["COMPRESS=LZW", "TILED=YES"],
+    )
+    out_ds.SetGeoTransform(gt)
+    out_ds.SetProjection(proj)
+    out_ds.GetRasterBand(1).WriteArray(arr)
+    out_ds.GetRasterBand(1).SetNoDataValue(-9999.0)
+    out_ds.FlushCache()
+    out_ds = None
+    return n_burned
+
+
+def _raster_shape(path: Path):
+    ds = gdal.Open(str(path))
+    if ds is None:
+        return None
+    shape = (ds.RasterYSize, ds.RasterXSize)
+    ds = None
+    return shape
+
+
+def _is_zero_raster(path: Path) -> bool:
+    """Return True if raster max ≈ 0 (mill burn failed — CRS mismatch)."""
+    ds = gdal.Open(str(path))
+    if ds is None:
+        return True
+    stats = ds.GetRasterBand(1).GetStatistics(0, 1)
+    ds = None
+    return stats[1] < 1e-6
+
+
+def _compute_gravity_for_period(
+    ctx: "RunContext",
+    mill_gpkg: Path,
+    out_raw: Path,
+    out_resid: Path,
+    dist_road: Path,
+    dist_town: Path,
+    force: bool = False,
+) -> float:
+    """Shared logic: rasterize mills → Gaussian filter → orthogonalize."""
+    from palmdef_risk.io.helpers import (
+        get_mask_properties, rasterize_vector, reproject_vector,
+    )
     d = ctx.data_dir
-    ref = d / "forest_t2.tif"
-    mill_gpkg = ctx.raw_dir / "mill" / "mill_t2.gpkg"
+    ref = ctx.raw_dir / "forest" / "forest_t2.tif"
+    if not ref.exists():
+        ref = d / "forest_t2.tif"  # fallback
+    r2 = 0.0
 
-    mask_props = get_mask_properties(str(ref))
-    mill_raster = d / "_mill_density_tmp.tif"
-    rasterize_vector(str(mill_gpkg), str(mill_raster), burn_value=1,
-                     mask_props=mask_props)
+    if not mill_gpkg.exists():
+        logger.warning("Mill file not found, skipping gravity: %s", mill_gpkg)
+        return r2
 
-    out = d / "gravity_raw.tif"
-    _apply_gaussian_filter(mill_raster, out,
-                           sigma_km=ctx.config.sigma_km,
-                           radius_km=ctx.config.radius_km)
-    mill_raster.unlink(missing_ok=True)
-    return out
+    ref_shape = _raster_shape(ref)
+    if out_raw.exists() and not force:
+        if _raster_shape(out_raw) != ref_shape:
+            logger.warning(
+                "%s shape %s != reference %s — recomputing",
+                out_raw.name, _raster_shape(out_raw), ref_shape,
+            )
+            out_raw.unlink()
+            if out_resid.exists():
+                out_resid.unlink()
+        elif _is_zero_raster(out_raw):
+            logger.warning(
+                "%s max≈0 (mill CRS mismatch in prior run) — recomputing",
+                out_raw.name,
+            )
+            out_raw.unlink()
+            if out_resid.exists():
+                out_resid.unlink()
+
+    if force or not out_raw.exists():
+        # Reproject mill to reference CRS if needed (handles UTM↔4326 mismatch).
+        # reproject_vector returns input_path unchanged when CRS already matches.
+        mask_props = get_mask_properties(str(ref))
+        proj_mill = out_raw.parent / f"_mill_proj_{out_raw.stem}.gpkg"
+        mill_src = Path(reproject_vector(str(mill_gpkg), str(proj_mill), mask_props["srs"]))
+        tmp = out_raw.parent / f"_mill_density_tmp_{out_raw.stem}.tif"
+        n_burned = _rasterize_points_numpy(mill_src, ref, tmp)
+        if mill_src == proj_mill:
+            proj_mill.unlink(missing_ok=True)
+        if n_burned == 0:
+            logger.error(
+                "No mill points burned into grid — check mill GPKG extent vs reference: %s",
+                mill_gpkg,
+            )
+            if tmp.exists():
+                tmp.unlink()
+            return r2
+        _apply_gaussian_filter(tmp, out_raw,
+                               sigma_km=ctx.config.sigma_km,
+                               radius_km=ctx.config.radius_km)
+        tmp.unlink(missing_ok=True)
+    else:
+        logger.info("skip (exists): %s", out_raw.name)
+
+    # Always rerun orthogonalize — it is cheap (<1 s OLS) and depends on
+    # dist_road and dist_town which may have changed since gravity_raw was cached.
+    r2 = orthogonalize_gravity(out_raw, dist_road, dist_town, out_resid)
+    return r2
 
 
-def orthogonalize_gravity_ctx(ctx: "RunContext") -> Path:
-    """Run orthogonalize_gravity using run context paths."""
+def compute_gravity_accessibility(ctx: "RunContext", force: bool = False) -> float:
+    """Compute gravity for modelling period (mill_t2) → data/gravity_resid.tif.
+
+    Returns R² of the OLS orthogonalization.
+    """
     d = ctx.data_dir
-    out = d / "gravity_resid.tif"
-    orthogonalize_gravity(d / "gravity_raw.tif", d / "dist_road.tif",
-                          d / "dist_town.tif", out)
-    return out
+    return _compute_gravity_for_period(
+        ctx,
+        mill_gpkg=ctx.raw_dir / "mill" / "mill_t2.gpkg",
+        out_raw=d / "gravity_raw.tif",
+        out_resid=d / "gravity_resid.tif",
+        dist_road=d / "dist_road.tif",
+        dist_town=d / "dist_town.tif",
+        force=force,
+    )
+
+
+def compute_gravity_forecast(ctx: "RunContext", force: bool = False) -> float:
+    """Compute gravity for forecast period (mill_t3) → data/forecast/gravity_resid.tif.
+
+    Returns R² of the OLS orthogonalization.
+    """
+    d = ctx.data_dir
+    fcast = d / "forecast"
+    fcast.mkdir(parents=True, exist_ok=True)
+    return _compute_gravity_for_period(
+        ctx,
+        mill_gpkg=ctx.raw_dir / "mill" / "mill_t3.gpkg",
+        out_raw=fcast / "gravity_raw.tif",
+        out_resid=fcast / "gravity_resid.tif",
+        dist_road=d / "dist_road.tif",
+        dist_town=fcast / "dist_town.tif",
+        force=force,
+    )
+
+
+def orthogonalize_gravity_ctx(ctx: "RunContext", force: bool = False) -> float:
+    """Alias kept for backward compatibility — calls compute_gravity_accessibility."""
+    return compute_gravity_accessibility(ctx, force=force)

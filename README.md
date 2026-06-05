@@ -1,6 +1,6 @@
-# palmoil_risk — Deforestation Risk Assessment (Palm Oil, Indonesia)
+# palmdef_risk — Deforestation Risk Assessment (Palm Oil, Indonesia)
 
-A Python pipeline for modelling spatial deforestation risk at the landscape scale. Downloads forest cover change data and spatial covariates from Google Earth Engine and OpenStreetMap, aligns them to a common grid, computes Location Quotient (LQ) surfaces, runs spatial correlation tests (SLX), and fits Bayesian ICAR models with optional Geographically Weighted Regression.
+A Python pipeline for modelling spatial deforestation risk driven by palm-oil mill accessibility. Downloads forest cover change and spatial covariates from Google Earth Engine and OpenStreetMap, aligns them to a UTM grid, computes mill accessibility surfaces, and fits Bayesian iCAR spatial models with three progressively richer covariate sets.
 
 ---
 
@@ -13,10 +13,11 @@ A Python pipeline for modelling spatial deforestation risk at the landscape scal
 5. [Step 1 — Create your config file](#5-step-1--create-your-config-file)
 6. [Step 2 — Run the pipeline](#6-step-2--run-the-pipeline)
 7. [Output structure](#7-output-structure)
-8. [Expected outputs explained](#8-expected-outputs-explained)
+8. [Aligned rasters reference](#8-aligned-rasters-reference)
 9. [Model variants](#9-model-variants)
-10. [UTM zone reference (Indonesia)](#10-utm-zone-reference-indonesia)
-11. [Troubleshooting](#11-troubleshooting)
+10. [Diagnostics reference](#10-diagnostics-reference)
+11. [UTM zone reference (Indonesia)](#11-utm-zone-reference-indonesia)
+12. [Troubleshooting](#12-troubleshooting)
 
 ---
 
@@ -24,15 +25,16 @@ A Python pipeline for modelling spatial deforestation risk at the landscape scal
 
 | Dependency | Version | Notes |
 |---|---|---|
-| Python | 3.10+ | via conda-far |
-| GDAL / osgeo | 3.x | included in conda-far |
-| forestatrisk | latest | ICAR modelling core |
+| Python | 3.10+ | via palmdef-risk environment |
+| GDAL / osgeo | 3.x | included in palmdef-risk |
+| forestatrisk | latest | iCAR modelling core |
 | Google Earth Engine | — | needs authenticated GCP project |
-| osmnx | — | OSM road/river/town download |
+| osmnx | — | OSM road / river / town download |
 | geopandas | — | vector I/O |
 | scipy / numpy / pandas | — | analytics |
-| papermill | — | notebook execution |
-| mgwr | optional | only needed if `run_gwr: true` |
+| psutil | optional | RAM-aware parallelism |
+| tqdm | — | progress bars |
+| libpysal / esda | optional | Moran's I spatial diagnostics |
 
 ---
 
@@ -43,8 +45,8 @@ A Python pipeline for modelling spatial deforestation risk at the landscape scal
 git clone <repo-url>
 cd deforestation-risk-palmoil
 
-# 2. Activate the conda environment (must be created separately)
-conda activate conda-far
+# 2. Activate the conda environment
+conda activate palmdef-risk
 
 # 3. Install the package in development mode
 pip install -e .
@@ -53,6 +55,9 @@ pip install -e .
 earthengine authenticate
 ```
 
+> **Windows note:** If PostgreSQL / PostGIS is installed, its `proj.db` conflicts with GDAL.
+> The pipeline fixes this automatically at startup by pointing PROJ to the conda environment.
+
 ---
 
 ## 3. Project structure
@@ -60,14 +65,23 @@ earthengine authenticate
 ```
 deforestation-risk-palmoil/
 ├── configs/
-│   └── template.yaml          ← copy this and fill in your study area
+│   ├── template.yaml              ← copy this and fill in your study area
+│   ├── central-kalimantan.yaml    ← example run config
+│   └── east-kotawaringin.yaml     ← example run config
 ├── notebooks/
-│   ├── 01_download.ipynb      ← Stage 1: download all data
-│   ├── 02_process.ipynb       ← Stage 2: align, LQ, SLX
-│   └── 03_model.ipynb         ← Stage 3: ICAR models, risk maps
-├── palmoil_risk/              ← Python package (do not edit)
-├── run.py                     ← CLI runner
-└── runs/                      ← all outputs land here (auto-created)
+│   ├── 01_download.ipynb          ← Stage 1: download forest, variables, mills
+│   ├── 02_process.ipynb           ← Stage 2: align, gravity, distances
+│   └── 03_model.ipynb             ← Stage 3: iCAR models, diagnostics, risk maps
+├── palmdef_risk/                  ← Python package
+│   ├── data/                      ← downloaders (forest, variables, mill, user inputs)
+│   ├── io/                        ← config, run context, helpers
+│   ├── model/                     ← iCAR fitting, prediction, diagnostics, reports
+│   ├── process/                   ← alignment, gravity, distances
+│   └── parallel.py                ← adaptive parallel executor
+├── tests/                         ← pytest test suite
+├── notes/                         ← analytical notes and design decisions
+├── docs/                          ← specs and implementation plans
+└── runs/                          ← all run outputs land here (auto-created)
 ```
 
 ---
@@ -80,258 +94,249 @@ You need either:
 
 **Option A — a vector file** (recommended)
 - Format: GeoPackage (`.gpkg`) or Shapefile (`.shp`)
-- CRS: any projected or geographic CRS (the pipeline reprojects internally)
+- CRS: any — the pipeline reprojects internally
 - Single polygon representing your study area boundary
-- Suggested location: `data/aoi/my_study_area.gpkg`
 
 **Option B — a bounding box string**
 - Format: `"xmin,ymin,xmax,ymax"` in decimal degrees (WGS84)
-- Example: `"108.5,-2.5,116.0,2.0"` for central Kalimantan
+- Example: `"108.5,-2.5,116.0,2.0"`
 
-### 4.2 User-supplied spatial inputs
-
-Prepare these files before running the pipeline. Store them anywhere accessible — you point to them in the config.
+### 4.2 Required user-supplied inputs
 
 | File | Format | Description |
 |---|---|---|
-| `peatland.gpkg` | Vector polygon | Peatland extent. May include depth attribute for continuous mode. |
-| `hgu.gpkg` | Vector polygon | Hydrological Geomorphic Units (HGU) classes. |
-| `plantation_t2.tif` | Raster (GeoTIFF) | Plantation cover at your reference year (t2). Must have distinct pixel values for industrial vs smallholder classes, e.g. 1=industrial, 2=smallholder, 0=no plantation. |
-| `plantation_t3.tif` | Raster (GeoTIFF) | Plantation cover at forecast year (t3). Optional — omit if not available. |
+| `peatland.gpkg` | Vector polygon | Peatland extent. Binary (presence) or continuous (depth in metres) — set `type:` in config. |
+| `hgu.gpkg` | Vector polygon | Hydrological Geomorphic Unit concession polygons. Used to compute signed distance covariate. |
 
-> **Tip:** A sensible folder to keep these is `data/user_inputs/` at the repo root. The pipeline copies them into the run folder automatically.
+### 4.3 Optional user-supplied inputs
 
-### 4.3 Google Earth Engine project
+| File | Format | Description |
+|---|---|---|
+| `plantation_t2.tif` | Raster | Plantation cover at reference year t2. Pixel values: `industrial_value` and `smallholder_value` (set in config). |
+| `plantation_t3.tif` | Raster | Plantation cover at forecast year t3. Optional. |
+| `river.gpkg` / `.shp` | Vector lines | Custom river / waterway network. If omitted, OSM waterways are downloaded automatically. |
 
-You need a GCP project with Earth Engine API enabled. Add your project ID to the config under `aoi` → the pipeline calls `ee.Initialize()` automatically inside the notebooks.
+### 4.4 Google Earth Engine project
+
+You need a GCP project with the Earth Engine API enabled. Set the project ID in your config under `gee_project`. The pipeline calls `ee.Initialize()` automatically.
 
 ---
 
 ## 5. Step 1 — Create your config file
 
 ```bash
-cp configs/template.yaml configs/kalimantan_baseline.yaml
+cp configs/template.yaml configs/my_study_area.yaml
 ```
 
-Open `configs/kalimantan_baseline.yaml` and fill in the fields:
+Open the copy and fill in the fields. Key sections:
 
 ```yaml
 run:
-  project: wri_palmoil        # short slug — used in run folder name
-  area: kalimantan_tengah     # study area label
-  task: baseline              # task label (baseline, scenario_a, …)
+  project: wri
+  area: central-kalimantan
+  task: baseline
 
 aoi:
-  source: data/aoi/kalteng.gpkg   # path to your AOI vector file
-  buffer: 5000                    # buffer in metres added before downloading data
+  source: data/user_inputs/my_aoi.gpkg
+  buffer: 500                      # metres buffered around AOI before downloading
 
-crs: "EPSG:32749"   # UTM zone for your area — see Section 10 below
+crs: null                          # null = auto-detect UTM from AOI centroid
+
+gee_project: "ee-myproject"        # your GEE cloud project ID
 
 forest:
-  source: tmf                     # tmf (JRC) or gfc (Hansen)
-  years: [2015, 2020, 2023]       # [t1, t2, t3] — three timestamps required
-  perc: 75                        # tree cover % threshold (gfc only)
+  source: gfc                      # "tmf" (JRC) or "gfc" (Hansen)
+  years: [2001, 2012, 2024]        # [t1, t2, t3]; t2 = reference year, t3 = forecast start
+  perc: 30                         # tree-cover threshold in percent, 30 is unofficial number but widely used in tropical areas (gfc only)
 
 variables:
-  use_ghsl_towns: false           # true = use GHSL built-up surface instead of OSM towns
+  use_ghsl_towns: false            # true = GHSL built-up surface instead of OSM towns
+  ghsl_years: null                 # required if use_ghsl_towns: true, e.g. [2012, 2024], it's available for every 5 years
   osm_timeout: 180
 
 user_inputs:
   peatland:
     path: data/user_inputs/peatland.gpkg
-    type: binary                  # binary or continuous (depth in metres)
+    type: binary                   # "binary" or "continuous"
   hgu:
     path: data/user_inputs/hgu.gpkg
   plantation:
-    t2: data/user_inputs/plantation_t2.tif
-    t3: null                      # omit or set to path of t3 plantation raster
+    t2: null                       # path to plantation raster at t2, or null
+    t3: null
     industrial_value: 1
     smallholder_value: 2
+  river:
+    path: null                     # path to custom river lines, or null (use OSM)
 
 mill:
-  source: trase                   # trase or gfw
+  source: trase                    # "trase" (auto-download) or "user" (supply your own)
+  path: null                       # required when source: "user"
 
 process:
-  kde_bandwidth_km: 35.0
-  lq_direction: mp                # mp = mills/plantation; pm = plantation/mills
+  gravity:
+    sigma_km: 25.0                 # Gaussian kernel σ for mill accessibility (km)
+    radius_km: 80.0                # truncation radius (must be > sigma_km)
+  sensitivity:
+    sigmas_km: [15.0, 25.0, 40.0] # σ values for bandwidth sensitivity sweep
 
 model:
-  variants: [A, B, E, F]         # which model variants to fit (A–G)
+  variants: [A, B, C]
+  nsamp: 10000                     # training sample size
+  csize: 10                        # iCAR spatial cell size (km)
+  Vbeta: 100                       # prior variance for fixed effects
   burnin: 1000
   mcmc: 1000
   thin: 1
-  run_gwr: false
+  seed: 42
+
+parallel:
+  max_workers: null                # null = auto (RAM + CPU governed)
+  cpu_fraction: 0.9
+  ram_per_dist_gb: 0.5
+  ram_per_icar_gb: 1.0
+  ram_per_predict_gb: 0.75
 
 output:
   project_future: false
-  projection_year: 2035
-  risk_classes: 5
-```
-
-**Validate your config without running anything:**
-
-```bash
-python run.py --config configs/kalimantan_baseline.yaml --dry-run
+  projection_year: 2025            # must exceed forest.years[-1]
 ```
 
 ---
 
 ## 6. Step 2 — Run the pipeline
 
-### Run all three stages in sequence
+Run the three notebooks interactively in Jupyter, in order:
 
-```bash
-conda activate conda-far
-python run.py --config configs/kalimantan_baseline.yaml
+```
+01_download.ipynb  →  02_process.ipynb  →  03_model.ipynb
 ```
 
-The pipeline creates a timestamped run folder under `runs/` and executes the three notebooks in order. Progress is logged to both the console and `runs/<run_folder>/logs/run.log`.
+Each notebook resumes gracefully: already-present outputs are detected and skipped, so you can re-run cells without re-downloading or recomputing.
 
-### Run a single stage
-
-```bash
-# Stage 1 only
-python run.py --config configs/kalimantan_baseline.yaml --notebook 01_download
-
-# Stage 2 only (re-use an existing run)
-python run.py --config configs/kalimantan_baseline.yaml --notebook 02_process --run-dir runs/wri_palmoil_kalimantan_tengah_baseline_20250512_143022
-```
-
-### Run notebooks interactively
-
-If you prefer Jupyter for exploration:
-
-```bash
-conda activate conda-far
-jupyter notebook notebooks/01_download.ipynb
-```
-
-Change the `config_path` parameter cell to point to your config before running.
+To resume an existing run folder rather than creating a new one, set `resume=True` in the notebook's setup cell.
 
 ---
 
 ## 7. Output structure
 
-Every run creates a self-contained timestamped folder:
-
 ```
 runs/
-└── wri_palmoil_kalimantan_tengah_baseline_20250512_143022/
-    ├── config.yaml                     ← copy of your config (reproducibility)
-    ├── logs/
-    │   └── run.log
+└── wri_central-kalimantan_baseline_20260521_112147/
+    ├── config.yaml                        ← exact config used (reproducibility)
+    ├── logs/run.log
     ├── data/
     │   ├── raw/
-    │   │   ├── forest/                 ← downloaded FCC tiles
-    │   │   ├── variables/              ← SRTM, WDPA, OSM downloads
-    │   │   ├── mill/                   ← mill.gpkg
-    │   │   └── user_inputs/            ← copies of your peatland/HGU/plantation files
-    │   └── intermediate/
-    │       └── kde/                    ← mill KDE surface
-    │   (+ all aligned rasters, flat)   ← forest_t2.tif, dist_road.tif, lq_mp.tif …
+    │   │   ├── forest/                    ← downloaded FCC tiles (forest_t1/t2/t3, fcc12/23/123)
+    │   │   ├── variables/                 ← SRTM, WDPA, OSM/GHSL downloads
+    │   │   ├── mill/                      ← mill_t2.gpkg, mill_t3.gpkg
+    │   │   └── user_inputs/               ← copies of peatland, HGU, plantation, river files
+    │   ├── intermediate/                  ← temporary reprojected vectors (auto-cleaned)
+    │   ├── forecast/                      ← distance rasters for forecast period (t3)
+    │   │   ├── dist_edge.tif
+    │   │   ├── dist_defor.tif
+    │   │   └── dist_town.tif
+    │   └── *.tif                          ← all aligned rasters (see Section 8)
     └── output/
-        ├── sample.csv                  ← training sample drawn from data/
+        ├── sample.csv                     ← training sample (nsamp rows)
         ├── models/
         │   ├── model_A/mod_A.pkl
         │   ├── model_B/mod_B.pkl
-        │   └── …
+        │   └── model_C/mod_C.pkl
         ├── diagnostics/
-        │   ├── moran.json
-        │   └── dic_table.csv
-        ├── predictions/
-        │   ├── risk_A.tif
-        │   ├── risk_B.tif
-        │   └── forest_future_A.tif     ← only if project_future: true
-        ├── correlation/
-        │   ├── slx_results.json
-        │   └── slx_report.txt
-        └── gwr/                        ← only if run_gwr: true
-            ├── gwr_coefficients.csv
-            └── gwr_summary.json
+        │   ├── vif.json                   ← Variance Inflation Factors
+        │   ├── moran.json                 ← Moran's I on deviance residuals
+        │   ├── gravity_sensitivity.json   ← accessibility coefficient across σ sweep
+        │   └── A/  B/  C/                 ← per-variant diagnostic outputs (see Section 10)
+        └── predictions/
+            ├── risk_A.tif                 ← annual deforestation probability (UInt16 scaled)
+            ├── risk_B.tif
+            ├── risk_C.tif
+            └── forest_future_*.tif        ← projected binary forest (if project_future: true)
 ```
 
 ---
 
-## 8. Expected outputs explained
+## 8. Aligned rasters reference
 
-### Aligned rasters (in `data/`)
+All rasters in `data/` are aligned to `forest_t2.tif` (reference grid, UTM, 30 m).
 
-These are the core inputs to the model — all aligned to `forest_t2.tif` as the reference grid.
-
-| File | Type | Description |
-|---|---|---|
-| `forest_t1/t2/t3.tif` | Byte | Binary forest cover at each timestamp (1=forest, 0=non-forest) |
-| `fcc12.tif` | Byte | Forest cover change t1→t2: 1=stayed forest, 0=deforested, 255=not forest at t1 |
-| `fcc23.tif` | Byte | Forest cover change t2→t3: 1=stayed forest, 0=deforested, 255=not forest at t2 — **the model training response** |
-| `fcc123.tif` | Byte | Trajectory: 0=never forest, 1=deforested t1→t2, 2=deforested t2→t3, 3=still forest |
-| `altitude.tif` | Float32 | SRTM elevation in metres |
-| `slope.tif` | Float32 | Slope in degrees |
-| `dist_edge.tif` | Float32 | Distance to forest edge at t2 (metres) |
-| `dist_defor.tif` | Float32 | Distance to past deforestation (fcc12, metres) |
-| `dist_road.tif` | Float32 | Distance to nearest road (metres) |
-| `dist_river.tif` | Float32 | Distance to nearest river (metres) |
-| `dist_town.tif` | Float32 | Distance to nearest town (metres) |
-| `dist_mill.tif` | Float32 | Distance to nearest palm oil mill (metres) |
-| `lq_mp.tif` | Float32 | Location Quotient: mill density relative to plantation density |
-| `lq_pm.tif` | Float32 | Location Quotient: plantation density relative to mill density |
-| `lq_sq.tif` | Byte | 5-zone LQ classification (1=very low to 5=very high) |
-| `mill_kde.tif` | Float32 | Gaussian KDE surface of mill locations |
-| `hgu.tif` | Byte | Rasterized HGU polygon layer |
-| `peatland.tif` | Byte / Float32 | Rasterized peatland (binary=presence, continuous=depth in m) |
-| `M.tif` | Float32 | Mill density surface (input to LQ and SLX) |
-| `P.tif` | Float32 | Plantation density surface (input to LQ and SLX) |
-
-### Prediction rasters (in `output/predictions/`)
-
-| File | Description |
-|---|---|
-| `risk_A.tif` — `risk_G.tif` | Continuous annual deforestation probability (0–1) for each fitted variant |
-| `forest_future_A.tif` etc. | Projected binary forest cover at `projection_year` — only produced when `project_future: true` |
-
-### Diagnostics (in `output/diagnostics/`)
-
-| File | Description |
-|---|---|
-| `dic_table.csv` | DIC (Deviance Information Criterion) for all fitted variants, sorted lowest-first. Lower DIC = better fit. Use this to select the best variant. |
-| `moran.json` | Moran's I statistic on ICAR spatial residuals. Values near 0 indicate the ICAR term has absorbed spatial autocorrelation. |
-
-### Causal direction test (in `output/correlation/`)
-
-| File | Description |
-|---|---|
-| `slx_results.json` | Forward (P ~ M + WM) and reverse (M ~ P + WP) SLX model results with R², coefficients, and direction finding |
-| `slx_report.txt` | Human-readable summary — read this first. Tells you whether to use `lq_direction: mp` or `pm` in your config. |
-
-### GWR outputs (in `output/gwr/`, only when `run_gwr: true`)
-
-| File | Description |
-|---|---|
-| `gwr_coefficients.csv` | Local regression coefficients at each sample point (one row per point, one column per covariate) |
-| `gwr_summary.json` | Global summary: bandwidth, AICc, R², sample size |
+| File | dtype | NoData | Description |
+|---|---|---|---|
+| `forest_t1/t2/t3.tif` | Byte | 255 | Binary forest cover at each timestamp (1=forest, 0=non-forest) |
+| `fcc12.tif` | Byte | 255 | Forest cover change t1→t2: 1=remained, 0=deforested |
+| `fcc23.tif` | Byte | 255 | Forest cover change t2→t3: **model training response** |
+| `fcc123.tif` | Byte | 255 | Three-period trajectory |
+| `altitude.tif` | Float32 | −9999 | SRTM elevation (metres) |
+| `slope.tif` | Float32 | −9999 | Slope (degrees) |
+| `protected.tif` | Byte | 255 | WDPA protected areas (1=protected) |
+| `road.tif` | Byte | 255 | OSM road presence (1=road) |
+| `river.tif` | Byte | 255 | OSM / user-supplied river presence (1=river) |
+| `town.tif` | Byte | 255 | OSM settlement presence (1=town) |
+| `dist_edge.tif` | Float32 | −9999 | Distance to forest edge at t2 (metres) |
+| `dist_defor.tif` | Float32 | −9999 | Distance to past deforestation fcc12 (metres) |
+| `dist_road.tif` | Float32 | −9999 | Distance to nearest road (metres) |
+| `dist_river.tif` | Float32 | −9999 | Distance to nearest river (metres) |
+| `dist_town.tif` | Float32 | −9999 | Distance to nearest town / GHSL centroid (metres) |
+| `gravity_raw.tif` | Float32 | −9999 | Raw Gaussian mill accessibility: Σ exp(−d²/2σ²) |
+| `gravity_resid.tif` | Float32 | −9999 | Mill accessibility residualised vs road + town distances |
+| `hgu_signed_dist.tif` | Float32 | −9999 | Signed distance to HGU boundary (negative inside, positive outside, metres) |
+| `peatland.tif` | Byte / Float32 | 255 / −9999 | Peatland (binary=presence; continuous=depth in metres) |
+| `plantation.tif` | Byte | 255 | Merged plantation presence raster (optional) |
+| `dist_plantation_edge.tif` | Float32 | −9999 | Distance to plantation boundary (optional) |
+| `mill.tif` | Byte | 255 | Mill location presence raster |
 
 ---
 
 ## 9. Model variants
 
-Variants build on each other progressively. Start with A and B, then add complexity if DIC improves.
+Three variants fit progressively richer covariate sets. All share the same iCAR spatial structure: `logit(p_i) = X_i β + ρ_cell(i)` where ρ is an intrinsic CAR spatial random effect absorbing residual spatial autocorrelation.
 
-| Variant | Covariates added | When to use |
+| Variant | Covariates | Purpose |
 |---|---|---|
-| **A** | Baseline only (altitude, slope, dist_defor, dist_edge, dist_road, dist_town, dist_river) | Always run as reference |
-| **B** | + HGU, peatland | When HGU and peatland files are available |
-| **C** | + dist_mill, dist_plantation, mill_kde, plantation_surface | When palm-sector variables are the focus |
-| **D** | B + C | Full covariate set without LQ |
-| **E** | B + C + LQ | Recommended baseline with LQ |
-| **F** | E + LQ² | When LQ has a non-linear relationship with risk |
-| **G** | F + LQ×HGU, LQ×peatland interactions | When SLX report shows strong policy-sector interaction |
+| **A** | altitude, slope, protected, log_dist_edge, log_dist_defor, log_dist_road, log_dist_river, log_dist_town | Biophysical baseline — no mill signal |
+| **B** | A + gravity_resid | Adds mill accessibility (orthogonalised vs road + town) |
+| **C** | B + hgu_b1 + hgu_b2 | Adds HGU concession effect via natural spline (knots at −5000 m, 0 m, +5000 m) |
 
-**Recommended starting set:** `variants: [A, B, E, F]`
+**Recommended run:** `variants: [A, B, C]`
+
+Use DIC (Deviance Information Criterion) to compare variants — lower is better. Moran's I on deviance residuals should be near zero for all accepted variants.
+
+> **Notes**
+> - `dist_plantation_edge` is computed but **not entered into any model formula** (planned for a future variant C extension via orthogonalization — see `notes/note_3.md`).
+> - `dist_mill` is **not** a model covariate — mill proximity is represented by `gravity_resid` only.
+> - `Vbeta > 100` risks a divergent MCMC chain under spatial confounding. A warning is raised automatically.
 
 ---
 
-## 10. UTM zone reference (Indonesia)
+## 10. Diagnostics reference
 
-Pick the UTM zone that covers most of your study area. Use the southern hemisphere (S) EPSG code unless the centroid is north of the equator.
+Per-variant outputs are written to `output/diagnostics/<A|B|C>/`.
+
+| File | Description |
+|---|---|
+| `summary_icar.txt` | MCMC posterior summary: mean, SD, 2.5 / 97.5 % credible intervals for each β |
+| `accuracy_summary.txt` | sklearn classification report (digits=4) at 0.5 probability threshold |
+| `roc_calibration.png` | ROC curve + calibration plot |
+| `mcmc_trace_*.png` | MCMC trace plots for each fixed-effect coefficient |
+| `mcmc_autocorr_*.png` | MCMC autocorrelation plots |
+| `mcmc_ess.txt` | Effective Sample Size for each coefficient |
+| `risk_map.png` | Spatial map of annual deforestation probability |
+| `rho_map.png` | Smooth interpolated spatial random effect ρ (1 km cubic spline) |
+| `risk_histogram.png` | Histogram of predicted probability values across the AOI |
+
+Run-level outputs in `output/diagnostics/`:
+
+| File | Description |
+|---|---|
+| `vif.json` | Variance Inflation Factors for all covariates. VIF > 5 triggers a warning. |
+| `moran.json` | Moran's I (k=8 KNN) on deviance residuals per variant. Values near 0 confirm spatial autocorrelation is absorbed. |
+| `gravity_sensitivity.json` | Accessibility coefficient and mean deviance at each σ in `sensitivity.sigmas_km`. Use to assess robustness to kernel bandwidth choice. |
+| `csize_icar.txt` | Cell size and number of iCAR spatial cells used. |
+| `fcc_history_map.png` | Forest cover change history map (fcc123). |
+
+---
+
+## 11. UTM zone reference (Indonesia)
 
 | Longitude band | Zone | EPSG (S hemisphere) | EPSG (N hemisphere) |
 |---|---|---|---|
@@ -344,29 +349,36 @@ Pick the UTM zone that covers most of your study area. Use the southern hemisphe
 | 132–138 °E | 53 | EPSG:32753 | EPSG:32653 |
 | 138–144 °E | 54 | EPSG:32754 | EPSG:32654 |
 
-**Examples:** Kalimantan Tengah → EPSG:32749 (108–114 °E, south). Sumatra (northern tip) → EPSG:32647.
+Set `crs: null` to auto-detect from AOI centroid.
+
+**Examples:** Central Kalimantan → EPSG:32749. East Kalimantan (east of 114°E) → EPSG:32750. North Sumatra → EPSG:32647.
 
 ---
 
-## 11. Troubleshooting
+## 12. Troubleshooting
 
 **`ee.Initialize()` fails**
-Run `earthengine authenticate` and ensure your GCP project has the Earth Engine API enabled at [console.cloud.google.com](https://console.cloud.google.com).
+Run `earthengine authenticate` and ensure the Earth Engine API is enabled for your GCP project at [console.cloud.google.com](https://console.cloud.google.com).
 
 **OSM download times out**
-Increase `variables.osm_timeout` (e.g. `300`). For very large AOIs, the query can take several minutes.
+Increase `variables.osm_timeout` (e.g. `730`). For large AOIs the Overpass query can take several minutes.
 
-**`proj.db` version conflict on Windows (PostGIS installed)**
-This is handled automatically. If you see PROJ errors anyway, ensure `pytest-env` is installed: `pip install pytest-env`.
+**PROJ / proj.db conflict (Windows + PostGIS installed)**
+The pipeline sets `PROJ_LIB` / `PROJ_DATA` automatically at startup by detecting the conda environment's `proj.db`. If PROJ errors still appear, confirm the palmdef-risk environment is active.
 
-**`forestatrisk` can't find rasters**
-All aligned rasters must be in the flat `data/` folder of the run (not in subdirectories). The pipeline handles this — only check if you're moving files manually.
+**Variables re-download even though some files exist**
+The downloader now checks each output file individually. If a partial set is present, only the missing outputs are downloaded. Delete the entire `raw/variables/` folder to force a full re-download.
 
-**DIC table shows `None`**
-The fitted model object did not expose a `.DIC` attribute. This usually means the MCMC chain was too short (`burnin` + `mcmc` < 500 total). Increase both to at least 500.
+**`reproject_vector` produces "No such file or directory" on intermediate GPKG**
+This means a vector was already in the target CRS, so `reproject_vector` returned the input path without creating the intermediate file. This is now fixed — the return value is used correctly for rasterization.
+
+**`Vbeta` warning appears**
+The prior variance for fixed effects is > 100. This can cause a divergent MCMC chain under spatial confounding. Reduce `Vbeta` to 10–100, especially if Moran's I on residuals is elevated.
+
+**DIC shows `None`**
+MCMC chain was too short. Increase `burnin` and `mcmc` to at least 500 each.
 
 **Run takes too long**
-- Reduce `mcmc` and `burnin` for a quick test (e.g. `burnin: 100, mcmc: 100`)
-- Reduce the AOI size
-- Use `variants: [A]` first to check the pipeline end-to-end
-- Set `run_gwr: false` (GWR bandwidth selection is slow)
+- Reduce `nsamp`, `burnin`, `mcmc` for a quick test
+- Use `variants: [A]` first to verify end-to-end
+- Reduce `max_workers` or lower `cpu_fraction` if RAM is the bottleneck

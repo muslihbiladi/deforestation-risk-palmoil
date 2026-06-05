@@ -28,17 +28,21 @@ def adaptive_workers(ram_per_task_gb: float, cfg) -> int:
     return max(1, n)
 
 
-def run_parallel(fn: Callable, tasks: list, ram_per_task_gb: float, cfg) -> list[Any]:
+def run_parallel(
+    fn: Callable, tasks: list, ram_per_task_gb: float, cfg, desc: str = "Tasks"
+) -> list[Any]:
     """Run fn(task) for each task. Falls back to sequential when workers=1."""
     if not tasks:
         return []
+    from tqdm.auto import tqdm
     n = adaptive_workers(ram_per_task_gb, cfg)
     if n == 1:
-        return [fn(t) for t in tasks]
+        return [fn(t) for t in tqdm(tasks, desc=desc, unit="task")]
     results: list[Any] = [None] * len(tasks)
     with ProcessPoolExecutor(max_workers=n) as pool:
         futs = {pool.submit(fn, t): i for i, t in enumerate(tasks)}
-        for fut in as_completed(futs):
+        for fut in tqdm(as_completed(futs), total=len(tasks),
+                        desc=f"{desc} ({n} workers)", unit="task"):
             results[futs[fut]] = fut.result()
     logger.info("run_parallel: %d tasks on %d workers", len(tasks), n)
     return results

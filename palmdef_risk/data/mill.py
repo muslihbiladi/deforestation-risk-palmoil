@@ -13,8 +13,8 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 _TRASE_URL = (
-    "https://trase.earth/open-data/datasets/"
-    "indonesia-palm-oil-mills/download?format=geojson"
+    "https://resources.trase.earth/data/facilities-data/"
+    "IDN_PO_mills_clean.geo.json"
 )
 
 
@@ -61,6 +61,15 @@ def download_mill(
     t2 = ctx.config.forest_years[1]
     t3 = ctx.config.forest_years[2] if len(ctx.config.forest_years) > 2 else t2
 
+    out_dir = ctx.raw_dir / "mill"
+    out_t2 = out_dir / "mill_t2.gpkg"
+    out_t3 = out_dir / "mill_t3.gpkg"
+
+    if use_cache and out_t2.exists() and out_t3.exists():
+        logger.info("Mill outputs already in run folder – skipping download.")
+        print("Mill: outputs already present in run folder, skipping.")
+        return {"mill_t2": out_t2, "mill_t3": out_t3}
+
     cm = CacheManager(ctx.config.cache_dir)
     cache_dir = cm.mill_dir(t2, t3)
 
@@ -79,11 +88,7 @@ def download_mill(
 
     # AOI clip + reproject to run CRS
     aoi_ext = _aoi_extent_4326(ctx)
-    out_dir = ctx.raw_dir / "mill"
     out_dir.mkdir(parents=True, exist_ok=True)
-
-    out_t2 = out_dir / "mill_t2.gpkg"
-    out_t3 = out_dir / "mill_t3.gpkg"
 
     for src, dst in [(raw_t2, out_t2), (raw_t3, out_t3)]:
         gdf = gpd.read_file(str(src))
