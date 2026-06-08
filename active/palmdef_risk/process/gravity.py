@@ -187,7 +187,11 @@ def _is_zero_raster(path: Path) -> bool:
     ds = gdal.Open(str(path))
     if ds is None:
         return True
-    stats = ds.GetRasterBand(1).GetStatistics(0, 1)
+    try:
+        stats = ds.GetRasterBand(1).GetStatistics(0, 1)
+    except RuntimeError:
+        ds = None
+        return True
     ds = None
     return stats[1] < 1e-6
 

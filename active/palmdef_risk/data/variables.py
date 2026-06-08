@@ -1263,8 +1263,25 @@ def download_variables(ctx: RunContext, use_cache: bool = True) -> dict:
     downloaded independently so partial runs resume without re-downloading
     already-present outputs.
     """
+    import shutil
+    from palmdef_risk.cache import CacheManager
+    from palmdef_risk.io.helpers import aoi_bbox_4326
+
     cfg = ctx.config
     out_dir = ctx.raw_dir / "variables"
+
+    _bbox = aoi_bbox_4326(cfg.aoi_source)
+    _cm = CacheManager(cfg.cache_dir)
+    _vkey = _cm.variables_key(_bbox, cfg.aoi_buffer, cfg.use_ghsl_towns, cfg.ghsl_years, cfg.osm_timeout)
+
+    if use_cache and _cm.variables_valid(_vkey, list(_bbox)):
+        _cache_d = _cm.variables_dir(_vkey)
+        out_dir.mkdir(parents=True, exist_ok=True)
+        for _f in _cache_d.iterdir():
+            if _f.name != "metadata.json":
+                shutil.copy2(_f, out_dir / _f.name)
+        print("Variables: loaded from cross-run cache.")
+        return {}
 
     if use_cache and _variables_complete(out_dir, cfg):
         print("Variables: all outputs already present in run folder, skipping.")
@@ -1343,4 +1360,12 @@ def download_variables(ctx: RunContext, use_cache: bool = True) -> dict:
         else:
             print("Variables: town.gpkg already present, skipping towns.")
 
+    _cache_d = _cm.variables_dir(_vkey)
+    _cache_d.mkdir(parents=True, exist_ok=True)
+    for _f in out_dir.iterdir():
+        if _f.is_file():
+            shutil.copy2(_f, _cache_d / _f.name)
+    (_cache_d / "metadata.json").write_text(
+        json.dumps({"downloaded_extent": list(_bbox)}), encoding="utf-8"
+    )
     return result

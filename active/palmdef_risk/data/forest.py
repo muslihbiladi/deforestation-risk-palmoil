@@ -1099,8 +1099,26 @@ def download_forest(ctx: RunContext, use_cache: bool = True) -> dict:
     Reads all parameters from ctx.config. Writes outputs to
     ctx.raw_dir/forest/. Returns the same dict as get_fcc().
     """
+    import json
+    import shutil
+    from palmdef_risk.cache import CacheManager
+    from palmdef_risk.io.helpers import aoi_bbox_4326
+
     cfg = ctx.config
     out_dir = ctx.raw_dir / "forest"
+
+    _bbox = aoi_bbox_4326(cfg.aoi_source)
+    _cm = CacheManager(cfg.cache_dir)
+    _fkey = _cm.forest_key(_bbox, cfg.aoi_buffer, cfg.forest_source, cfg.forest_years, cfg.forest_perc)
+
+    if use_cache and _cm.forest_valid(_fkey, list(_bbox)):
+        _cache_d = _cm.forest_dir(_fkey)
+        out_dir.mkdir(parents=True, exist_ok=True)
+        for _f in _cache_d.iterdir():
+            if _f.name != "metadata.json":
+                shutil.copy2(_f, out_dir / _f.name)
+        print("Forest: loaded from cross-run cache.")
+        return {"forest_cover": str(out_dir / "forest_cover.tif")}
 
     if use_cache and (out_dir / "fcc23.tif").exists():
         print("Forest: outputs already present in run folder, skipping.")
@@ -1115,7 +1133,7 @@ def download_forest(ctx: RunContext, use_cache: bool = True) -> dict:
     # aoi_buffer is in metres; get_fcc expects degrees (~111 320 m/deg at equator)
     buff_deg = cfg.aoi_buffer / 111_320.0
 
-    return get_fcc(
+    result = get_fcc(
         aoi=cfg.aoi_source,
         years=cfg.forest_years,
         source=cfg.forest_source,
@@ -1125,3 +1143,12 @@ def download_forest(ctx: RunContext, use_cache: bool = True) -> dict:
         output_crs=ctx.config.crs,
         verbose=True,
     )
+    _cache_d = _cm.forest_dir(_fkey)
+    _cache_d.mkdir(parents=True, exist_ok=True)
+    for _f in out_dir.iterdir():
+        if _f.is_file():
+            shutil.copy2(_f, _cache_d / _f.name)
+    (_cache_d / "metadata.json").write_text(
+        json.dumps({"downloaded_extent": list(_bbox)}), encoding="utf-8"
+    )
+    return result

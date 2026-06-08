@@ -192,8 +192,9 @@ spline term of Model C (§4.2).
 1. Rasterize the HGU polygons to a 30 m binary mask.
 2. GDAL proximity (Euclidean distance) from the **exterior** → `dist_outside`.
 3. GDAL proximity from the **interior** → `dist_inside`.
-4. Signed distance = `dist_outside − dist_inside` — **negative inside**
-   concessions, **positive outside**, **zero at the boundary**.
+4. Signed distance = `dist_from_inside − dist_from_outside` — **negative inside**
+   concessions (inside ≈ 0 minus outside positive = negative), **positive outside**
+   (outside positive minus inside ≈ 0 = positive), **zero at the boundary**.
 
 Because the surface is signed, a spline fitted on it can bend differently on
 either side of the boundary (§4.2) — the inside and outside slopes are not

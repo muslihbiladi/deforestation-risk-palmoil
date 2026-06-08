@@ -114,7 +114,7 @@ class RunConfig:
             model_variants=list(mod.get("variants", ["A", "B", "C"])),
             nsamp=int(mod.get("nsamp", 10000)),
             csize=int(mod.get("csize", 10)),
-            Vbeta=float(mod.get("Vbeta", 1000)),
+            Vbeta=float(mod.get("Vbeta", 10)),
             burnin=int(mod.get("burnin", 1000)),
             mcmc=int(mod.get("mcmc", 1000)),
             thin=int(mod.get("thin", 1)),

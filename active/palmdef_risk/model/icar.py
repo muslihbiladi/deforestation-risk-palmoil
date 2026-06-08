@@ -77,7 +77,13 @@ def prepare_sample(data: pd.DataFrame) -> pd.DataFrame:
     return data
 
 
-def _build_and_fit(variant: str, ctx: "RunContext", data: pd.DataFrame) -> dict:
+def _build_and_fit(
+    variant: str,
+    ctx: "RunContext",
+    data: pd.DataFrame,
+    nneigh: np.ndarray | None = None,
+    adj: np.ndarray | None = None,
+) -> dict:
     """Build formula + run iCAR MCMC on the provided sample DataFrame.
 
     Returns the model state dict (no file I/O). Used by both fit_model (which
@@ -106,11 +112,12 @@ def _build_and_fit(variant: str, ctx: "RunContext", data: pd.DataFrame) -> dict:
     formula = build_formula(variant, data)
 
     cfg = ctx.config
-    nneigh, adj = far.cellneigh(
-        raster=str(ctx.data_dir / "fcc23.tif"),
-        csize=cfg.csize,
-        rank=1,
-    )
+    if nneigh is None or adj is None:
+        nneigh, adj = far.cellneigh(
+            raster=str(ctx.data_dir / "fcc23.tif"),
+            csize=cfg.csize,
+            rank=1,
+        )
     mod = far.model_binomial_iCAR(
         suitability_formula=formula,
         data=data,
@@ -135,11 +142,16 @@ def _build_and_fit(variant: str, ctx: "RunContext", data: pd.DataFrame) -> dict:
     }
 
 
-def fit_model(variant: str, ctx: "RunContext") -> Path:
+def fit_model(
+    variant: str,
+    ctx: "RunContext",
+    nneigh: np.ndarray | None = None,
+    adj: np.ndarray | None = None,
+) -> Path:
     """Fit one iCAR model variant. Returns path to saved .pkl file."""
     sample_path = ctx.output_dir / "sample.csv"
     data = pd.read_csv(sample_path)
-    state = _build_and_fit(variant, ctx, data)
+    state = _build_and_fit(variant, ctx, data, nneigh=nneigh, adj=adj)
 
     model_dir = ctx.output_dir / "models" / f"model_{variant}"
     model_dir.mkdir(parents=True, exist_ok=True)
@@ -152,12 +164,19 @@ def fit_model(variant: str, ctx: "RunContext") -> Path:
 
 def fit_all(ctx: "RunContext") -> list[Path]:
     """Fit all configured model variants sequentially."""
+    import forestatrisk as far
     from tqdm.auto import tqdm
     results = []
     variants = list(ctx.config.model_variants)
+    cfg = ctx.config
+    nneigh, adj = far.cellneigh(
+        raster=str(ctx.data_dir / "fcc23.tif"),
+        csize=cfg.csize,
+        rank=1,
+    )
     for v in tqdm(variants, desc="Fitting iCAR models", unit="variant"):
         try:
-            path = fit_model(v, ctx)
+            path = fit_model(v, ctx, nneigh=nneigh, adj=adj)
             results.append(path)
         except Exception:
             import traceback

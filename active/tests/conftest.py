@@ -8,17 +8,24 @@ from pathlib import Path
 # On Windows machines that also have PostgreSQL/PostGIS installed, PROJ_LIB
 # may be set to a stale postgis proj directory (DATABASE.LAYOUT.VERSION.MINOR=2)
 # which causes GetSpatialRef() to return None.  We override PROJ_LIB and
-# PROJ_DATA to point at the conda-far PROJ database before osgeo is imported.
+# PROJ_DATA to point at the palmdef-risk PROJ database before osgeo is imported.
 # ---------------------------------------------------------------------------
-_conda_prefix = Path(sys.executable).parent.parent
-for _candidate in [
-    _conda_prefix / "Library" / "share" / "proj",
-    _conda_prefix / "share" / "proj",
-]:
-    if (_candidate / "proj.db").exists():
-        os.environ["PROJ_LIB"] = str(_candidate)
-        os.environ["PROJ_DATA"] = str(_candidate)
-        break
+# On Windows, conda envs have python.exe at <prefix>\python.exe (no bin/ dir).
+# On Linux/Mac, it's at <prefix>/bin/python, so .parent.parent is needed.
+# Try both to handle both platforms.
+_exe = Path(sys.executable)
+for _conda_prefix in [_exe.parent, _exe.parent.parent]:
+    for _candidate in [
+        _conda_prefix / "Library" / "share" / "proj",
+        _conda_prefix / "share" / "proj",
+    ]:
+        if (_candidate / "proj.db").exists():
+            os.environ["PROJ_LIB"] = str(_candidate)
+            os.environ["PROJ_DATA"] = str(_candidate)
+            break
+    else:
+        continue
+    break
 
 import pytest
 import numpy as np

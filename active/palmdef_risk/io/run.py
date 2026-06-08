@@ -108,6 +108,7 @@ def create_run(
         ],
     )
     logging.getLogger(__name__).info("Run created: %s", run_dir)
+    print(f"run_dir={run_dir.resolve()}")
     return ctx
 
 
@@ -138,6 +139,7 @@ def create_or_resume_run(
                 run_dir = candidates[0]
                 logging.getLogger(__name__).info("Resuming run: %s", run_dir)
                 print(f"Resuming existing run: {run_dir.name}")
+                print(f"run_dir={run_dir.resolve()}")
                 return load_run(run_dir)
         logging.getLogger(__name__).warning(
             "No existing run found matching '%s*', creating new run.", prefix
