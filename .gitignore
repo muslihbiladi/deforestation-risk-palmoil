@@ -10,15 +10,15 @@ palmdef_risk.egg-info/
 __pycache__/
 *.pyc
 
-# datasets
-data/*.gpkg
-data/*.tif
-data/*.tiff
-data/*.shp
-data/*.shx
-data/*.dbf
-data/*.prj
-data/*.geojson
-data/*.csv
-data/*.parquet
-data/*.nc
+# datasets (pipeline data now lives under active/data/)
+active/data/*.gpkg
+active/data/*.tif
+active/data/*.tiff
+active/data/*.shp
+active/data/*.shx
+active/data/*.dbf
+active/data/*.prj
+active/data/*.geojson
+active/data/*.csv
+active/data/*.parquet
+active/data/*.nc

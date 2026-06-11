@@ -114,7 +114,7 @@ class RunConfig:
             model_variants=list(mod.get("variants", ["A", "B", "C"])),
             nsamp=int(mod.get("nsamp", 10000)),
             csize=int(mod.get("csize", 10)),
-            Vbeta=float(mod.get("Vbeta", 10)),
+            Vbeta=float(mod.get("Vbeta", 1000)),
             burnin=int(mod.get("burnin", 1000)),
             mcmc=int(mod.get("mcmc", 1000)),
             thin=int(mod.get("thin", 1)),
@@ -134,7 +134,7 @@ class RunConfig:
         if self.Vbeta > 100:
             logger.warning(
                 "Vbeta=%.0f > 100: risk of divergent MCMC chain under spatial confounding. "
-                "Consider reducing to ~10 if residual autocorrelation is high.", self.Vbeta
+                "Consider reducing the value.", self.Vbeta
             )
 
     def validate(self) -> List[str]:

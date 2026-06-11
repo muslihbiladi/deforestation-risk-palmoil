@@ -304,7 +304,7 @@ Use DIC (Deviance Information Criterion) to compare variants — lower is better
 > **Notes**
 > - `dist_plantation_edge` is computed but **not entered into any model formula** (planned for a future variant C extension via orthogonalization — see `notes/note_3.md`).
 > - `dist_mill` is **not** a model covariate — mill proximity is represented by `gravity_resid` only.
-> - `Vbeta > 100` risks a divergent MCMC chain under spatial confounding. A warning is raised automatically.
+> - `Vbeta > 100` triggers a warning. Consider reducing the value if the MCMC chain shows signs of poor convergence.
 
 ---
 
@@ -373,7 +373,7 @@ The downloader now checks each output file individually. If a partial set is pre
 This means a vector was already in the target CRS, so `reproject_vector` returned the input path without creating the intermediate file. This is now fixed — the return value is used correctly for rasterization.
 
 **`Vbeta` warning appears**
-The prior variance for fixed effects is > 100. This can cause a divergent MCMC chain under spatial confounding. Reduce `Vbeta` to 10–100, especially if Moran's I on residuals is elevated.
+The prior variance for fixed effects is > 100. Consider reducing the value if the MCMC chain shows signs of poor convergence (e.g. elevated Moran's I on residuals, unstable betas).
 
 **DIC shows `None`**
 MCMC chain was too short. Increase `burnin` and `mcmc` to at least 500 each.

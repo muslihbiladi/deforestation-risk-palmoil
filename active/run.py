@@ -62,7 +62,7 @@ def _run_notebook(
         str(nb_in),
         str(nb_out),
         parameters=params,
-        kernel_name="conda-far",
+        kernel_name="palmdef-risk",
     )
 
     elapsed = time.time() - t0

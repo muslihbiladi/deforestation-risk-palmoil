@@ -70,7 +70,7 @@ model:
   variants: [A, B, C]   # A = biophysical, B = +gravity_resid, C = +HGU spline
   nsamp: 10000          # number of pixels to sample for model training
   csize: 10             # spatial cell size in km for iCAR neighbourhood
-  Vbeta: 10             # prior variance for fixed effects (> 100 may cause divergence)
+  Vbeta: 1000           # prior variance for fixed effects (forestatrisk default)
   burnin: 1000          # MCMC burn-in iterations
   mcmc: 1000            # MCMC sampling iterations after burn-in
   thin: 1               # MCMC thinning interval (keep every n-th sample)
