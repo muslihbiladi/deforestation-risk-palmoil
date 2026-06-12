@@ -1541,8 +1541,9 @@ def _variables_complete(out_dir, cfg) -> bool:
         out_dir / f"{_WDPA_OUTPUT_NAME}.gpkg",
         out_dir / "road.gpkg",
     ]
-    # river: skip check if user supplies their own file
-    if not getattr(cfg, "river_path", None):
+    # river: required unless the user supplies their own file
+    # (user file lives in user_inputs/, not variables/)
+    if cfg.river_source != "user":
         required.append(out_dir / "river.gpkg")
     # town: OSM point file OR both GHSL rasters
     if cfg.use_ghsl_towns:
@@ -1569,7 +1570,8 @@ def download_variables(ctx: RunContext, use_cache: bool = True) -> dict:
 
     _bbox = aoi_bbox_4326(cfg.aoi_source)
     _cm = CacheManager(cfg.cache_dir)
-    _vkey = _cm.variables_key(_bbox, cfg.aoi_buffer, cfg.use_ghsl_towns, cfg.ghsl_years, cfg.osm_timeout)
+    _vkey = _cm.variables_key(_bbox, cfg.aoi_buffer, cfg.use_ghsl_towns,
+                              cfg.ghsl_years, cfg.osm_timeout, cfg.river_source)
 
     if use_cache and _cm.variables_valid(_vkey, list(_bbox)):
         _cache_d = _cm.variables_dir(_vkey)
@@ -1632,13 +1634,16 @@ def download_variables(ctx: RunContext, use_cache: bool = True) -> dict:
     else:
         print("Variables: road.gpkg already present, skipping roads.")
 
-    # Rivers — skip if user-supplied or already present
-    if getattr(cfg, "river_path", None):
-        print("Variables: user-supplied river configured, skipping OSM river.")
-    elif not (out_dir / "river.gpkg").exists():
-        result.update(get_rivers(**osm_kwargs))
-    else:
+    # Rivers — source-dependent: user file (ingested separately), BIG RBI, or OSM
+    if cfg.river_source == "user":
+        print("Variables: river.source=user — river ingested from user_inputs, "
+              "skipping download.")
+    elif (out_dir / "river.gpkg").exists():
         print("Variables: river.gpkg already present, skipping rivers.")
+    elif cfg.river_source == "big":
+        result.update(get_rivers_big(**osm_kwargs))
+    else:  # "osm"
+        result.update(get_rivers(**osm_kwargs))
 
     # Towns / GHSL
     if cfg.use_ghsl_towns:

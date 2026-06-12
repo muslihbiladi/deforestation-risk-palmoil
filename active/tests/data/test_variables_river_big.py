@@ -90,3 +90,64 @@ def test_get_rivers_big_empty_writes_empty_gpkg(tmp_path):
     import os
     assert os.path.exists(out["river"])
     assert len(gpd.read_file(out["river"])) == 0
+
+
+from palmdef_risk.io.run import create_run
+
+
+class _Cfg:
+    """Duck-typed config for _variables_complete river logic."""
+    def __init__(self, river_source, use_ghsl_towns=False):
+        self.river_source = river_source
+        self.use_ghsl_towns = use_ghsl_towns
+
+
+def test_variables_complete_river_required_for_big(tmp_path):
+    from palmdef_risk.data.variables import _variables_complete
+    for name in ("altitude.tif", "slope.tif", "protected.gpkg",
+                 "road.gpkg", "town.gpkg"):
+        (tmp_path / name).write_text("x")
+    assert _variables_complete(tmp_path, _Cfg("big")) is False
+    (tmp_path / "river.gpkg").write_text("x")
+    assert _variables_complete(tmp_path, _Cfg("big")) is True
+
+
+def test_variables_complete_river_not_required_for_user(tmp_path):
+    from palmdef_risk.data.variables import _variables_complete
+    for name in ("altitude.tif", "slope.tif", "protected.gpkg",
+                 "road.gpkg", "town.gpkg"):
+        (tmp_path / name).write_text("x")
+    assert _variables_complete(tmp_path, _Cfg("user")) is True
+
+
+def test_download_variables_dispatches_big(minimal_config_yaml, tmp_path):
+    from palmdef_risk.data import variables as v
+    ctx = create_run(minimal_config_yaml, runs_root=tmp_path / "runs")
+    ctx.config.river_source = "big"
+
+    called = {}
+
+    def fake_big(**kw):
+        called["big"] = True
+        out = kw["output_dir"]
+        import os
+        os.makedirs(out, exist_ok=True)
+        p = os.path.join(out, "river.gpkg")
+        open(p, "w").close()
+        return {"river": p}
+
+    def fake_osm(**kw):
+        called["osm"] = True
+        return {}
+
+    with patch.object(v, "get_srtm", return_value={}), \
+         patch.object(v, "get_wdpa", return_value={}), \
+         patch.object(v, "get_roads", return_value={}), \
+         patch.object(v, "get_towns", return_value={}), \
+         patch.object(v, "ee"), \
+         patch.object(v, "get_rivers_big", side_effect=fake_big), \
+         patch.object(v, "get_rivers", side_effect=fake_osm):
+        v.download_variables(ctx, use_cache=False)
+
+    assert called.get("big") is True
+    assert "osm" not in called
