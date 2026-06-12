@@ -17,7 +17,8 @@ def ingest_user_inputs(ctx: RunContext) -> dict[str, Path | None]:
     file is missing, unreadable, or missing a CRS definition.
 
     Returns dict with keys: peatland, hgu, plantation_t2, plantation_t3, river.
-    plantation_t3 and river are None if not configured (OSM fallback for river).
+    plantation_t3 is None if not configured; river is None unless river.source=user
+    (otherwise river is downloaded in Stage 1).
     """
     dst = ctx.raw_dir / "user_inputs"
     cfg = ctx.config
@@ -38,11 +39,12 @@ def ingest_user_inputs(ctx: RunContext) -> dict[str, Path | None]:
         log.info("plantation.t3 not configured — dist_plantation_edge_forecast will be skipped")
         result["plantation_t3"] = None
 
-    if cfg.river_path:
+    if cfg.river_source == "user":
         result["river"] = _copy_vector(cfg.river_path, dst, "river")
-        log.info("User-supplied river will override OSM download")
+        log.info("User-supplied river (source=user) will override downloaded river")
     else:
-        log.info("user_inputs.river.path not set — OSM river will be used if available")
+        log.info("river.source=%s — river will be downloaded in Stage 1",
+                 cfg.river_source)
         result["river"] = None
 
     log.info("User inputs ingested to %s", dst)
