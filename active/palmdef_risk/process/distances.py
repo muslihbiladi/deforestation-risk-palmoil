@@ -114,7 +114,7 @@ def compute_all_distances(ctx: "RunContext") -> None:
         dist_plantation_edge
 
     Forecast distances (data/forecast/):
-        dist_edge, dist_defor, dist_town
+        dist_edge, dist_defor, dist_town, dist_plantation_edge
 
     dist_town source priority (both periods):
         1. raw_dir/variables/town.gpkg            (OSM points)
@@ -187,6 +187,12 @@ def compute_all_distances(ctx: "RunContext") -> None:
         out_path = d / f"{name}.tif"
         if src_path.exists() and _needs_recompute(out_path, ref_shape):
             tasks.append(("raster", src_path, out_path, tgt))
+
+    # Forecast plantation edge distance (t3 plantation raster), model name under forecast/
+    plant_t3 = d / "plantation_t3.tif"
+    dist_plant_fc = fcast / "dist_plantation_edge.tif"
+    if plant_t3.exists() and _needs_recompute(dist_plant_fc, ref_shape):
+        tasks.append(("raster", plant_t3, dist_plant_fc, 1))
 
     # dist_town (forecast): OSM points (static) or GHSL t3 raster
     dist_town_fc = fcast / "dist_town.tif"
