@@ -77,7 +77,7 @@ def test_get_rivers_big_merges_layers(tmp_path):
     assert len(gdf) == 5  # 3 lines + 2 polygons merged
     geom_types = set(gdf.geometry.geom_type)
     assert {"LineString"}.issubset(geom_types)
-    assert any("Polygon" in t for t in geom_types)
+    assert "Polygon" in geom_types
     assert gdf.crs.to_epsg() == 32749  # reprojected to requested CRS
 
 
@@ -89,3 +89,4 @@ def test_get_rivers_big_empty_writes_empty_gpkg(tmp_path):
     assert out["river"].endswith("river.gpkg")
     import os
     assert os.path.exists(out["river"])
+    assert len(gpd.read_file(out["river"])) == 0
