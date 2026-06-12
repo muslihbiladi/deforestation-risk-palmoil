@@ -82,6 +82,36 @@ def test_run_folder_name_format(minimal_config_yaml):
     assert name == "test_proj_test_area_test_20260511_143022"
 
 
+def test_default_variants_are_a_to_e(minimal_config_yaml):
+    import yaml
+    from palmdef_risk.io.config import RunConfig
+    raw = yaml.safe_load(minimal_config_yaml.read_text())
+    del raw["model"]["variants"]  # force the default
+    minimal_config_yaml.write_text(yaml.dump(raw))
+    cfg = RunConfig.from_yaml(minimal_config_yaml)
+    assert cfg.model_variants == ["A", "B", "C", "D", "E"]
+
+
+def test_validate_accepts_d_and_e(minimal_config_yaml):
+    import yaml
+    from palmdef_risk.io.config import RunConfig
+    raw = yaml.safe_load(minimal_config_yaml.read_text())
+    raw["model"]["variants"] = ["A", "D", "E"]
+    minimal_config_yaml.write_text(yaml.dump(raw))
+    cfg = RunConfig.from_yaml(minimal_config_yaml)
+    assert "model.variants" not in " ".join(cfg.validate())
+
+
+def test_validate_rejects_unknown_variant(minimal_config_yaml):
+    import yaml
+    from palmdef_risk.io.config import RunConfig
+    raw = yaml.safe_load(minimal_config_yaml.read_text())
+    raw["model"]["variants"] = ["A", "Z"]
+    minimal_config_yaml.write_text(yaml.dump(raw))
+    cfg = RunConfig.from_yaml(minimal_config_yaml)
+    assert any("unknown variant" in e.lower() for e in cfg.validate())
+
+
 def _base_cfg(uif):
     return {
         "run": {"project": "test_proj", "area": "test_area", "task": "test"},

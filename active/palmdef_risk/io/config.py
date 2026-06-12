@@ -6,7 +6,7 @@ from typing import Optional, List
 import yaml
 
 logger = logging.getLogger(__name__)
-VALID_VARIANTS = {"A", "B", "C"}
+VALID_VARIANTS = {"A", "B", "C", "D", "E"}
 
 
 @dataclass
@@ -113,7 +113,7 @@ class RunConfig:
             sigma_km=float(grav.get("sigma_km", 25.0)),
             radius_km=float(grav.get("radius_km", 80.0)),
             sensitivity_sigmas=[float(s) for s in sens.get("sigmas_km", [15.0, 25.0, 40.0])],
-            model_variants=list(mod.get("variants", ["A", "B", "C"])),
+            model_variants=list(mod.get("variants", ["A", "B", "C", "D", "E"])),
             nsamp=int(mod.get("nsamp", 10000)),
             csize=int(mod.get("csize", 10)),
             Vbeta=float(mod.get("Vbeta", 1000)),
@@ -152,7 +152,7 @@ class RunConfig:
             errors.append("variables.ghsl_years required when use_ghsl_towns: true")
         for v in self.model_variants:
             if v not in VALID_VARIANTS:
-                errors.append(f"model.variants: unknown variant '{v}' (valid: A, B, C)")
+                errors.append(f"model.variants: unknown variant '{v}' (valid: A, B, C, D, E)")
         if self.peatland_type not in ("binary", "continuous"):
             errors.append("user_inputs.peatland.type must be 'binary' or 'continuous'")
         if self.forest_source not in ("tmf", "gfc"):
