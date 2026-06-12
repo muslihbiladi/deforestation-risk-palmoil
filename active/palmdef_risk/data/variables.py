@@ -1034,6 +1034,74 @@ def _big_query_layer(layer_id, bbox, timeout=180, verbose=True):
     return features
 
 
+def get_rivers_big(aoi, output_dir="data", buff=0.0, output_crs=None,
+                   timeout=180, verbose=True):
+    """Download river features from BIG RBI (Layers 237 lines + 257 polygons).
+
+    Fetches geometry only, merges both layers into one generic-geometry
+    GeoDataFrame, clips to the AOI polygon, optionally reprojects to
+    output_crs, and writes <output_dir>/river.gpkg. Wide-river polygons (257)
+    are kept as polygons: process/distances.py burns them as a presence area,
+    which is the correct representation for dist_river.
+
+    Hard-fails (RuntimeError, raised by _big_query_layer) if the BIG service
+    cannot be reached — no silent OSM fallback.
+
+    Signature mirrors get_rivers() so download_variables can dispatch with the
+    same kwargs. Returns {"river": path}.
+    """
+    from shapely.geometry import shape
+
+    if verbose:
+        print("=" * 60)
+        print("Downloading BIG RBI rivers (Layers 237 + 257)...")
+
+    os.makedirs(output_dir, exist_ok=True)
+    polygon = _load_aoi_polygon(aoi, buff)
+    bbox = polygon.bounds  # (xmin, ymin, xmax, ymax) in EPSG:4326
+    gpkg_path = os.path.join(output_dir, "river.gpkg")
+
+    geoms = []
+    for layer_id in (_BIG_RIVER_LINE_LAYER, _BIG_RIVER_AREA_LAYER):
+        feats = _big_query_layer(layer_id, bbox, timeout=timeout,
+                                 verbose=verbose)
+        for ft in feats:
+            g = ft.get("geometry")
+            if g:
+                geoms.append(shape(g))
+
+    if not geoms:
+        if verbose:
+            print("  No BIG river features in AOI — writing empty river.gpkg.")
+        _create_empty_gpkg(gpkg_path, ogr.wkbLineString)
+        return {"river": gpkg_path}
+
+    gdf = gpd.GeoDataFrame(geometry=geoms, crs="EPSG:4326")
+
+    # Clip to the AOI polygon (in EPSG:4326 before reprojection)
+    aoi_gdf = gpd.GeoDataFrame(geometry=[polygon], crs="EPSG:4326")
+    before = len(gdf)
+    gdf = gpd.clip(gdf, aoi_gdf)
+    gdf = gdf[~gdf.geometry.is_empty & gdf.geometry.notna()]
+    if verbose:
+        print(f"  Clipped to AOI: {before} -> {len(gdf)} features")
+
+    if gdf.empty:
+        _create_empty_gpkg(gpkg_path, ogr.wkbLineString)
+        return {"river": gpkg_path}
+
+    if output_crs is not None:
+        gdf = gdf.to_crs(output_crs)
+
+    if os.path.exists(gpkg_path):
+        os.remove(gpkg_path)
+    gdf.to_file(gpkg_path, driver="GPKG")
+
+    if verbose:
+        print(f"  {len(gdf)} features -> {gpkg_path}")
+    return {"river": gpkg_path}
+
+
 # ============================================================
 # osmnx-based OSM downloader
 # ============================================================
