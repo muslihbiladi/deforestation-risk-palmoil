@@ -25,9 +25,9 @@ def test_big_query_layer_paginates():
     from palmdef_risk.data import variables as v
 
     page1 = {"features": [_line_feature(i) for i in range(1000)],
-             "properties": {"exceededTransferLimit": True}}
+             "exceededTransferLimit": True}
     page2 = {"features": [_line_feature(1000 + i) for i in range(5)],
-             "properties": {"exceededTransferLimit": False}}
+             "exceededTransferLimit": False}
     responses = [_FakeResp(page1), _FakeResp(page2)]
 
     with patch.object(v, "requests", create=True) as mock_requests:
@@ -151,3 +151,20 @@ def test_download_variables_dispatches_big(minimal_config_yaml, tmp_path):
 
     assert called.get("big") is True
     assert "osm" not in called
+
+
+def test_big_query_layer_continues_on_full_page_without_flag():
+    from palmdef_risk.data import variables as v
+
+    # Page 1: exactly 1000 features, NO exceededTransferLimit key at all.
+    # Page 2: short page → terminates.
+    page1 = {"features": [_line_feature(i) for i in range(1000)]}
+    page2 = {"features": [_line_feature(1000 + i) for i in range(2)]}
+    responses = [_FakeResp(page1), _FakeResp(page2)]
+
+    with patch.object(v, "requests", create=True) as mock_requests:
+        mock_requests.get = MagicMock(side_effect=responses)
+        feats = v._big_query_layer(237, (110.0, -2.0, 111.0, 0.0),
+                                   timeout=10, verbose=False)
+    assert len(feats) == 1002
+    assert mock_requests.get.call_count == 2

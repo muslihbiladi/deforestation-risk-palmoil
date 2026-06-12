@@ -1025,9 +1025,8 @@ def _big_query_layer(layer_id, bbox, timeout=180, verbose=True):
         if verbose:
             print(f"    BIG layer {layer_id}: +{len(page)} "
                   f"(total {len(features)})")
-        exceeded = (data.get("properties", {}) or {}).get(
-            "exceededTransferLimit", False)
-        if not exceeded or len(page) < _BIG_PAGE_SIZE:
+        exceeded = data.get("exceededTransferLimit", False)
+        if len(page) < _BIG_PAGE_SIZE and not exceeded:
             break
         offset += _BIG_PAGE_SIZE
         time.sleep(1)  # be polite to the public service
