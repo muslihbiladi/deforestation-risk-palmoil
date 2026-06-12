@@ -176,3 +176,31 @@ def test_build_forecast_vardir_copies_statics(tmp_path, write_raster,
     for name in ["altitude.tif", "slope.tif", "dist_road.tif", "dist_river.tif",
                  "protected.tif", "hgu_signed_dist.tif"]:
         assert (fcast / name).exists(), f"static not copied: {name}"
+
+
+def test_predict_forecast_skips_when_covariates_missing(tmp_path, write_raster,
+                                                        minimal_config_yaml):
+    import pickle
+    import numpy as np
+    from osgeo import gdal
+    from palmdef_risk.io.run import create_run
+    from palmdef_risk.model.predict import predict_forecast
+
+    ctx = create_run(minimal_config_yaml, runs_root=tmp_path / "runs")
+    _make_sample_csv(ctx.output_dir)
+    model_dir = ctx.output_dir / "models" / "model_A"
+    model_dir.mkdir(parents=True, exist_ok=True)
+    state = {
+        "betas": np.zeros(1), "rho": np.zeros(4),
+        "formula": "I(1 - fcc23) + trial ~ scale(altitude) + protected + cell",
+        "variant": "A",
+    }
+    with open(model_dir / "mod_A.pkl", "wb") as f:
+        pickle.dump(state, f)
+    write_raster(model_dir / "rho.tif", np.ones((4, 4), dtype=np.float32),
+                 [500000, 30, 0, 9000120, 0, -30], 32750,
+                 dtype=gdal.GDT_Float32, nodata=-9999.0)
+    (ctx.data_dir / "forecast").mkdir(parents=True, exist_ok=True)
+    # forecast var_dir lacks altitude.tif/protected.tif → guard returns None
+    result = predict_forecast(ctx, model_dir / "mod_A.pkl", "A")
+    assert result is None
