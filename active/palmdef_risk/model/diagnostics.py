@@ -99,7 +99,7 @@ def compute_residuals_all(
     deviance residuals alongside the (X, Y) coords of the surviving rows.
     """
     from patsy import dmatrices
-    from palmdef_risk.model.icar import prepare_sample, _LOG_DIST_COLS
+    from palmdef_risk.model.icar import prepare_sample, _LOG_DIST_COLS, variant_extra_cols
 
     sample_path = ctx.output_dir / "sample.csv"
     base_data = pd.read_csv(sample_path)
@@ -122,10 +122,7 @@ def compute_residuals_all(
         with open(pkl_path, "rb") as fh:
             state = pickle.load(fh)
 
-        extra_cols = (
-            (["gravity_resid"] if variant in ("B", "C") else [])
-            + (["hgu_b1", "hgu_b2"] if variant == "C" else [])
-        )
+        extra_cols = variant_extra_cols(variant)
         data = base_data.dropna(subset=base_cols + extra_cols)
         if len(data) == 0:
             logger.warning("No rows survive dropna for variant %s — skipping", variant)
