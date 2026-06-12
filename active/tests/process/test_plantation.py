@@ -54,3 +54,36 @@ def test_orthogonalize_plantation_respects_nodata(tmp_path, write_raster):
     resid = ds.GetRasterBand(1).ReadAsArray()
     ds = None
     assert resid[0, 0] == -9999.0
+
+
+def test_compute_plantation_resid_forecast(tmp_path, write_raster, write_vector,
+                                           minimal_config_yaml):
+    import numpy as np
+    from osgeo import gdal
+    from palmdef_risk.io.run import create_run
+    from palmdef_risk.process.plantation import compute_plantation_resid_forecast
+
+    ctx = create_run(minimal_config_yaml, runs_root=tmp_path / "runs")
+    d = ctx.data_dir
+    fcast = d / "forecast"
+    fcast.mkdir(parents=True, exist_ok=True)
+    gt = [500000, 100, 0, 9001000, 0, -100]
+    rng = np.random.default_rng(1)
+    for path in [fcast / "dist_plantation_edge.tif", fcast / "dist_edge.tif",
+                 fcast / "dist_defor.tif", d / "dist_road.tif"]:
+        write_raster(path, rng.uniform(1, 5000, (10, 10)).astype(np.float32),
+                     gt, 32750, dtype=gdal.GDT_Float32, nodata=-9999.0)
+
+    r2 = compute_plantation_resid_forecast(ctx)
+    assert (fcast / "plantation_resid.tif").exists()
+    assert 0.0 <= r2 <= 1.0
+
+
+def test_compute_plantation_resid_skips_when_absent(tmp_path, write_vector,
+                                                    minimal_config_yaml):
+    from palmdef_risk.io.run import create_run
+    from palmdef_risk.process.plantation import compute_plantation_resid
+    ctx = create_run(minimal_config_yaml, runs_root=tmp_path / "runs")
+    # No dist_plantation_edge.tif in data_dir → must skip, return 0.0
+    assert compute_plantation_resid(ctx) == 0.0
+    assert not (ctx.data_dir / "plantation_resid.tif").exists()
