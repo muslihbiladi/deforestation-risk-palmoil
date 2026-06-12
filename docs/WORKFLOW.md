@@ -183,7 +183,7 @@ with infrastructure — the Claim 2 language is softened accordingly.
 ### 3.4 HGU signed-distance raster
 
 A signed-distance surface to HGU concession boundaries, feeding the HGU
-spline term of Model C (§4.2).
+spline term of Model E (§4.2).
 
 **Source.** User-supplied HGU concession polygons.
 
@@ -203,6 +203,35 @@ are computed in the original km scale (knots fixed at −5, 0, +5 km) and
 then standardized individually with `scale()`, so extreme values simply
 extrapolate linearly beyond the outer knots without distorting the knot
 positions.
+
+### 3.5 Plantation proximity residual (`plantation_resid`)
+
+An orthogonalized plantation-proximity covariate that isolates plantation
+boundary proximity from the generic landscape connectivity already captured
+by `dist_edge`, `dist_defor`, and `dist_road`.
+
+**Source.** User-supplied plantation boundary polygons (industrial and/or
+smallholder, merged to a single binary presence raster at align time).
+
+**Processing (`process/plantation.py`):**
+
+1. Align the plantation presence raster and compute Euclidean distance →
+   `dist_plantation_edge.tif`.
+2. Regress `log(dist_plantation_edge)` on
+   `log(dist_edge) + log(dist_defor) + log(dist_road)` using OLS (pixel sample).
+3. The model residual becomes `plantation_resid`:
+
+```
+plantation_resid = log(dist_plantation_edge) − OLS(log(dist_plantation_edge) ~ log(dist_edge) + log(dist_defor) + log(dist_road))
+```
+
+The output raster is written to `data/plantation_resid.tif` and the matching
+sample column is named `plantation_resid`. **The values are already in
+log-space — never apply a log transform again.**
+
+The orthogonalization is pre-registered. Models C, D, and E (§4.2) test the
+*marginal* plantation-boundary signal after controlling for landscape proximity
+gradients.
 
 ---
 
@@ -228,10 +257,10 @@ The result, `output/sample.csv`, has one row per pixel: `x`, `y`, `fcc23`
 (0 = deforested, 1 = still forest), `cell`, and every covariate value sampled
 from the rasters.
 
-### 4.2 iCAR model fitting — three nested models
+### 4.2 iCAR model fitting — five nested models
 
 A Bayesian spatial logistic regression (`forestatrisk.model_binomial_iCAR`) is
-fitted for each of three pre-registered nested models, each adding covariates
+fitted for each of five pre-registered nested models, each adding covariates
 to the previous. Each fit records WAIC, explained deviance, the posterior
 mean + 95 % CI for every β coefficient, and Rhat for convergence.
 
@@ -239,9 +268,11 @@ mean + 95 % CI for every β coefficient, and Rhat for convergence.
 |---|---|---|
 | **A — Biophysical baseline** | altitude, slope, dist_edge, dist_road, dist_town, dist_river, dist_defor, pa_status (all z-score standardized) | WAIC, explained deviance, β posteriors, Rhat |
 | **B — + gravity accessibility** | Model A + the orthogonalized gravity accessibility residual (§3.3) | ΔWAIC vs. A; Δdeviance; accessibility coefficient — direction, magnitude, 95 % CI |
-| **C — + HGU spline** | Model B + the HGU restricted cubic spline | ΔWAIC vs. B; Δdeviance; spline marginal-effect plot; inside- vs. outside-slope comparison |
+| **C — + plantation residual** | Model A + the orthogonalized plantation proximity residual (`plantation_resid`, §3.5) | ΔWAIC vs. A; Δdeviance; plantation coefficient |
+| **D — + gravity + plantation** | Model A + gravity_resid + plantation_resid | ΔWAIC vs. B and C; joint coefficient posteriors |
+| **E — + HGU spline** | Model D + the HGU restricted cubic spline | ΔWAIC vs. D; Δdeviance; spline marginal-effect plot; inside- vs. outside-slope comparison |
 
-**HGU spline specification.** Model C enters the §3.4 signed distance through
+**HGU spline specification.** Model E enters the §3.4 signed distance through
 a **restricted cubic spline with 3 knots** at −5 km, 0 km (the boundary), and
 +5 km. The basis columns b₁, b₂ are computed in the original km scale so the
 knot positions are always correct regardless of the value distribution; each
@@ -287,23 +318,28 @@ For each fitted model:
 3. `predict_raster_binomial_iCAR` — combine covariates + rho into
    `risk_{model}.tif`. Output is UInt16: values 1–65535 encode probability,
    `0` = NoData. Only currently-forested pixels are predicted.
-4. Optional `project_future`: for pixels forested at t3, compute
+4. `predict_forecast` — re-predicts risk using t3-state covariates assembled
+   into `data/forecast/` by `build_forecast_vardir`, producing
+   `predictions/risk_{v}_forecast.tif` per variant. (Note: `project_future` /
+   `deforest()` still ranks on the t2 risk map; switching to the forecast risk
+   for ranking is deferred.)
+5. Optional `project_future`: for pixels forested at t3, compute
    `P(survive) = (1 − p_annual)^n_years` and write a binary
    `forest_future_{model}.tif`.
 
 ### 4.4 Spatial validation
 
 **Leave-one-island-out cross-validation.** In-sample AUC is optimistic under
-spatial autocorrelation. Model C is therefore validated with spatial block
+spatial autocorrelation. Model E is therefore validated with spatial block
 cross-validation: four folds, each holding out one island — Sumatra,
-Kalimantan, Papua, Sulawesi. Each fold refits the full Model C on the
+Kalimantan, Papua, Sulawesi. Each fold refits the full Model E on the
 remaining three islands, predicts on the held-out island, and computes AUC
 and Brier score. Budget ≈ 2–3 h per fold, ≈ 8–12 h total.
 
-**Residual Moran's I.** Deviance residuals for Models A, B, and C are computed
+**Residual Moran's I.** Deviance residuals for Models A, B, C, D, and E are computed
 on the 10×10 km iCAR grid, then Moran's I is computed with a row-standardized
 weights matrix W (libpysal / esda). Moran's I is expected to **decline from
-A → C** as the iCAR term absorbs the remaining autocorrelation.
+A → E** as the iCAR term absorbs the remaining autocorrelation.
 
 **Reliability diagrams.** Predicted probabilities are binned in deciles and
 the observed deforestation rate is computed per bin, plotted per island as a
@@ -312,7 +348,7 @@ near the 1:1 diagonal.
 
 ### 4.5 Robustness and sensitivity
 
-**Temporal robustness.** Model C is refit on two configurable sub-periods —
+**Temporal robustness.** Model E is refit on two configurable sub-periods —
 2017–2019 (`lossyear ∈ {17,18,19}`) and 2019–2021 (`lossyear ∈ {19,20,21}`)
 — and the HGU spline shape and accessibility coefficient are compared across
 them. This addresses the temporal mismatch of the 2019-vintage HGU layer.
@@ -324,7 +360,7 @@ bandwidth.
 
 ### 4.6 Inference strategy — all-outcome publishable
 
-The A → B → C comparison is designed so that **every outcome yields a
+The A → B → C → D → E comparison is designed so that **every outcome yields a
 defensible, policy-relevant claim** — there is no result that leaves the
 analysis without a finding.
 
@@ -332,9 +368,12 @@ analysis without a finding.
 |---|---|
 | B ≫ A (accessibility significant) | Supply-chain pull carries spatial signal in deforestation risk beyond generic infrastructure proximity |
 | B ≈ A (accessibility null) | Mill accessibility adds no marginal predictive value once road/town proximity is controlled — economic pull is already captured by infrastructure distance |
-| C ≫ B (HGU significant, asymmetric) | Concession boundaries create a spatially asymmetric deforestation gradient consistent with leakage / containment / encroachment |
-| C ≫ B (HGU significant, symmetric) | Concession boundaries create a uniform distance gradient; legal conversion and encroachment are equally intensive |
-| C ≈ B (HGU null) | Concession boundaries add no marginal signal beyond supply-chain geography — boundary enforcement is spatially redundant |
+| C ≫ A (plantation significant) | Plantation proximity creates a measurable deforestation gradient beyond biophysical factors |
+| C ≈ A (plantation null) | Plantation boundaries add no marginal signal beyond biophysical geography at 30 m scale |
+| D ≫ B,C (joint signal) | Mill accessibility and plantation proximity carry independent spatial signals |
+| E ≫ D (HGU significant, asymmetric) | Concession boundaries create a spatially asymmetric deforestation gradient consistent with leakage / containment / encroachment |
+| E ≫ D (HGU significant, symmetric) | Concession boundaries create a uniform distance gradient; legal conversion and encroachment are equally intensive |
+| E ≈ D (HGU null) | Concession boundaries add no marginal signal beyond supply-chain and plantation geography — boundary enforcement is spatially redundant |
 | All ≈ A | Biophysical geography dominates; supply-chain and institutional variables are spatially redundant at 30 m scale |
 
 ---
@@ -379,9 +418,11 @@ After a full three-stage run, the run folder contains:
 |------|---------|
 | `data/raw/**` | Raw downloaded source data (forest, variables, mill, user inputs) |
 | `data/*.tif` | Aligned 30 m raster stack — covariates, distances, SFCA surfaces |
+| `data/forecast/plantation_resid.tif` | Plantation proximity residual raster for t3-state forecast covariates |
 | `output/sample.csv` | Training sample (pixels × covariates + outcome + cell) |
-| `output/models/model_{A..F}/mod_{X}.pkl` | Fitted iCAR models (betas, rho, MCMC chain, deviance) |
-| `output/predictions/risk_{X}.tif` | Deforestation risk maps — UInt16, 1–65535 = probability, 0 = NoData |
+| `output/models/model_{A..E}/mod_{X}.pkl` | Fitted iCAR models (betas, rho, MCMC chain, deviance) |
+| `output/predictions/risk_{X}.tif` | Deforestation risk maps (t2-state) — UInt16, 1–65535 = probability, 0 = NoData |
+| `output/predictions/risk_{X}_forecast.tif` | Deforestation risk maps (t3-state covariates) — same encoding |
 | `output/predictions/rho_{X}.tif` | Interpolated spatial random-effect surface |
 | `output/predictions/forest_future_{X}.tif` | Optional future-forest projection (binary) |
 | `logs/run.log` | Full run log |
