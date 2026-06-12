@@ -147,7 +147,7 @@
       "properties": {
         "variants": {
           "type": "array",
-          "items": {"type": "string", "enum": ["A", "B", "C"]},
+          "items": {"type": "string", "enum": ["A", "B", "C", "D", "E"]},
           "minItems": 1
         },
         "nsamp": {"type": "integer", "minimum": 1},

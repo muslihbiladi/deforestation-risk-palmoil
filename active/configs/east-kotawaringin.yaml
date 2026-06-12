@@ -67,7 +67,7 @@ process:
 
 # ── Modelling ─────────────────────────────────────────────────────────────────
 model:
-  variants: [A, B, C]   # A = biophysical, B = +gravity_resid, C = +HGU spline
+  variants: [A, B, C, D, E]   # A=biophysical, B=+gravity, C=+plantation, D=+both, E=+both+HGU spline
   nsamp: 10000          # number of pixels to sample for model training
   csize: 10             # spatial cell size in km for iCAR neighbourhood
   Vbeta: 1000           # prior variance for fixed effects (forestatrisk default)
