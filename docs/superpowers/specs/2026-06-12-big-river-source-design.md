@@ -98,7 +98,8 @@ def get_rivers_big(aoi, output_dir="data", buff=0.0, output_crs=None,
 Behavior:
 1. `polygon = _load_aoi_polygon(aoi, buff)`; bbox = `polygon.bounds` (EPSG:4326).
 2. For each layer in (237, 257): paginated REST query (see §3.3), collect GeoJSON
-   feature pages.
+   feature pages. Geometry only — no attribute fields are fetched (`dist_river`
+   uses presence, not names/classes).
 3. Build a GeoDataFrame per layer (EPSG:4326), concat into one GeoDataFrame
    (generic geometry — lines + polygons coexist).
 4. Clip to the AOI polygon (`gpd.clip`), drop empty/null geometries.
@@ -127,11 +128,16 @@ A small private helper `_big_query_layer(layer_id, bbox, timeout, verbose)`:
   inSR=4326
   outSR=4326
   spatialRel=esriSpatialRelIntersects
-  outFields=OBJECTID,NAMOBJ,KLSSNG,REMARK
+  returnGeometry=true
+  outFields=OBJECTID
+  geometryPrecision=5
   resultOffset={offset}
   resultRecordCount=1000
   f=geojson
   ```
+  **Minimal payload:** only geometry + `OBJECTID` are requested (OID kept for
+  stable pagination ordering; all other attributes dropped — unused downstream).
+  `geometryPrecision=5` trims coordinates to ~1 m to further shrink each page.
 - Uses `requests.get` with `_BIG_UA` header and retry/backoff mirroring
   `_overpass_post` (one retry per attempt, short sleep on transient failure).
 - Continues until response `properties.exceededTransferLimit` is false/absent
