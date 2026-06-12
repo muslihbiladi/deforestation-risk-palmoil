@@ -38,11 +38,11 @@ def orthogonalize_plantation(
     """
     p_arr, p_nd, gt, proj, shape = _load_flat(dist_plant_path)
     e_arr, e_nd, *_ = _load_flat(dist_edge_path)
-    f_arr, f_nd, *_ = _load_flat(dist_defor_path)
+    f_arr, d_nd, *_ = _load_flat(dist_defor_path)
     r_arr, r_nd, *_ = _load_flat(dist_road_path)
 
     mask = (
-        (p_arr != p_nd) & (e_arr != e_nd) & (f_arr != f_nd) & (r_arr != r_nd)
+        (p_arr != p_nd) & (e_arr != e_nd) & (f_arr != d_nd) & (r_arr != r_nd)
     )
     y = np.log(p_arr[mask] + 1.0)
     Xe = np.log(e_arr[mask] + 1.0)
@@ -94,6 +94,11 @@ def compute_plantation_resid(ctx: "RunContext", force: bool = False) -> float:
     if out_resid.exists() and not force:
         logger.info("plantation_resid.tif exists — skipping")
         return 0.0
+    regressors = [d / "dist_edge.tif", d / "dist_defor.tif", d / "dist_road.tif"]
+    missing = [p.name for p in regressors if not p.exists()]
+    if missing:
+        logger.warning("plantation_resid skipped — missing regressor raster(s): %s", missing)
+        return 0.0
     return orthogonalize_plantation(
         dist_plant, d / "dist_edge.tif", d / "dist_defor.tif",
         d / "dist_road.tif", out_resid,
@@ -116,6 +121,11 @@ def compute_plantation_resid_forecast(ctx: "RunContext", force: bool = False) ->
         return 0.0
     if out_resid.exists() and not force:
         logger.info("forecast/plantation_resid.tif exists — skipping")
+        return 0.0
+    regressors = [fcast / "dist_edge.tif", fcast / "dist_defor.tif", d / "dist_road.tif"]
+    missing = [p.name for p in regressors if not p.exists()]
+    if missing:
+        logger.warning("forecast plantation_resid skipped — missing regressor raster(s): %s", missing)
         return 0.0
     return orthogonalize_plantation(
         dist_plant, fcast / "dist_edge.tif", fcast / "dist_defor.tif",
