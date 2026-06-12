@@ -40,6 +40,10 @@ def ingest_user_inputs(ctx: RunContext) -> dict[str, Path | None]:
         result["plantation_t3"] = None
 
     if cfg.river_source == "user":
+        if not cfg.river_path:
+            raise ValueError(
+                "user_inputs.river.path is required when river.source: 'user'"
+            )
         result["river"] = _copy_vector(cfg.river_path, dst, "river")
         log.info("User-supplied river (source=user) will override downloaded river")
     else:
