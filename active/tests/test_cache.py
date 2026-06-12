@@ -48,7 +48,15 @@ def test_forest_miss_when_extent_too_small(tmp_path):
 def test_status_report_keys(tmp_path):
     cm = CacheManager(tmp_path / "cache")
     k = cm.forest_key((0, 0, 1, 1), 0, "tmf", [], 75)
-    kv = cm.variables_key((0, 0, 1, 1), 0, False, None, 180)
+    kv = cm.variables_key((0, 0, 1, 1), 0, False, None, 180, "big")
     report = cm.status_report(2020, 2023, [0, 0, 1, 1], k, kv)
     assert set(report.keys()) == {"mill", "forest", "variables"}
     assert report["mill"] == "miss"
+
+
+def test_variables_key_differs_by_river_source(tmp_path):
+    from palmdef_risk.cache import CacheManager
+    cm = CacheManager(tmp_path / "cache")
+    k_big = cm.variables_key((0, 0, 1, 1), 0, False, None, 180, "big")
+    k_osm = cm.variables_key((0, 0, 1, 1), 0, False, None, 180, "osm")
+    assert k_big != k_osm

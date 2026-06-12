@@ -43,8 +43,9 @@ class CacheManager:
         return bool(stored and _covers(stored, needed_bbox))
 
     # ── Variables ────────────────────────────────────────────
-    def variables_key(self, aoi_bbox, buffer, use_ghsl, ghsl_years, timeout) -> str:
-        return _hash(aoi_bbox, buffer, use_ghsl, ghsl_years, timeout)
+    def variables_key(self, aoi_bbox, buffer, use_ghsl, ghsl_years, timeout,
+                      river_source="big") -> str:
+        return _hash(aoi_bbox, buffer, use_ghsl, ghsl_years, timeout, river_source)
 
     def variables_dir(self, key: str) -> Path:
         return self.cache_dir / "variables" / key
