@@ -154,3 +154,25 @@ def test_risk_raster_is_uint16_nodata_zero(tmp_path, write_raster):
     result = band.ReadAsArray()
     assert result[result > 0].min() >= 1
     ds = None
+
+
+def test_build_forecast_vardir_copies_statics(tmp_path, write_raster,
+                                              minimal_config_yaml):
+    import numpy as np
+    from osgeo import gdal
+    from palmdef_risk.io.run import create_run
+    from palmdef_risk.model.predict import build_forecast_vardir
+
+    ctx = create_run(minimal_config_yaml, runs_root=tmp_path / "runs")
+    d = ctx.data_dir
+    d.mkdir(parents=True, exist_ok=True)
+    gt = [500000, 30, 0, 9000300, 0, -30]
+    arr = np.ones((10, 10), dtype=np.float32)
+    for name in ["altitude.tif", "slope.tif", "dist_road.tif", "dist_river.tif",
+                 "protected.tif", "hgu_signed_dist.tif"]:
+        write_raster(d / name, arr, gt, 32750, dtype=gdal.GDT_Float32, nodata=-9999.0)
+
+    fcast = build_forecast_vardir(ctx)
+    for name in ["altitude.tif", "slope.tif", "dist_road.tif", "dist_river.tif",
+                 "protected.tif", "hgu_signed_dist.tif"]:
+        assert (fcast / name).exists(), f"static not copied: {name}"

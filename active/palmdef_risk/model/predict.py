@@ -13,6 +13,34 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+# Static covariates reused from the t2 grid for forecast prediction (no t3 source).
+_FORECAST_STATIC_RASTERS = (
+    "altitude.tif", "slope.tif", "dist_road.tif", "dist_river.tif",
+    "protected.tif", "hgu_signed_dist.tif",
+)
+
+
+def build_forecast_vardir(ctx: "RunContext") -> Path:
+    """Assemble a clean data/forecast/ holding the full model-named covariate set.
+
+    Copies static t2 rasters in; the t3 dynamics (dist_edge, dist_defor, dist_town,
+    gravity_resid, plantation_resid) are produced upstream in Stage 2 and already
+    live under data/forecast/. Returns the forecast directory path.
+    """
+    import shutil
+    d = ctx.data_dir
+    fcast = d / "forecast"
+    fcast.mkdir(parents=True, exist_ok=True)
+    for name in _FORECAST_STATIC_RASTERS:
+        src = d / name
+        if src.exists():
+            shutil.copy2(src, fcast / name)
+        else:
+            logger.warning(
+                "Static covariate %s missing — forecast var_dir may be incomplete", name
+            )
+    return fcast
+
 
 def _create_log_dist_rasters(data_dir: Path, formula: str) -> None:
     """Write log_dist_*.tif rasters to data_dir for each log_dist_* term in formula.
