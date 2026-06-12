@@ -175,6 +175,11 @@ def fit_all(ctx: "RunContext") -> list[Path]:
         rank=1,
     )
     for v in tqdm(variants, desc="Fitting iCAR models", unit="variant"):
+        pkl_path = ctx.output_dir / "models" / f"model_{v}" / f"mod_{v}.pkl"
+        if pkl_path.exists():
+            logger.info("mod_%s.pkl exists — skipping fit", v)
+            results.append(pkl_path)
+            continue
         try:
             path = fit_model(v, ctx, nneigh=nneigh, adj=adj)
             results.append(path)

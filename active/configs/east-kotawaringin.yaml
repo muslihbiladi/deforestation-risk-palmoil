@@ -33,7 +33,7 @@ forest:
 # ── Covariate downloads ───────────────────────────────────────────────────────
 variables:
   use_ghsl_towns: true         # true → GHSL built-up surface instead of OSM towns
-  ghsl_years: [2020, 2025]              # required when use_ghsl_towns: true, e.g. [2020, 2024]
+  ghsl_years: [2010, 2025]              # required when use_ghsl_towns: true, e.g. [2020, 2024]
   osm_timeout: 730              # OSM query timeout in seconds
 
 # ── User-supplied spatial inputs ─────────────────────────────────────────────

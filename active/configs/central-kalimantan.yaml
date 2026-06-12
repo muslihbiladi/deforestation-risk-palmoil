@@ -71,8 +71,8 @@ model:
   nsamp: 100000          # number of pixels to sample for model training
   csize: 10             # spatial cell size in km for iCAR neighbourhood
   Vbeta: 100           # prior variance for fixed effects
-  burnin: 30000          # MCMC burn-in iterations
-  mcmc: 200000            # MCMC sampling iterations after burn-in
+  burnin: 1000          # MCMC burn-in iterations
+  mcmc: 20000            # MCMC sampling iterations after burn-in
   thin: 10               # MCMC thinning interval (keep every n-th sample)
   seed: 42              # random seed for reproducibility
 

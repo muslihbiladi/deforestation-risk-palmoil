@@ -1,9 +1,9 @@
 import pytest
 import numpy as np
+import pandas as pd
 from pathlib import Path
-from unittest.mock import patch, MagicMock
+from unittest.mock import patch
 import pickle
-import tempfile
 
 
 class _FakeConfig:
@@ -11,6 +11,7 @@ class _FakeConfig:
     projection_year = 2030
     forest_years = [2010, 2020, 2023]
     risk_classes = 5
+    csize = 10
 
 
 class _FakeCtx:
@@ -22,30 +23,48 @@ class _FakeCtx:
         self.config = _FakeConfig()
 
 
-class _StubModel:
-    betas_names = []
-    betas = []
-    DIC = 400.0
-
-
-def _make_model_pkl(tmp_path):
-    mod = _StubModel()
-    pkl_path = tmp_path / "mod_A.pkl"
-    with open(pkl_path, "wb") as fh:
-        pickle.dump(mod, fh)
-    return pkl_path, mod
+def _make_sample_csv(output_dir, n=60):
+    """Minimal sample.csv with the columns prepare_sample + the test formula need."""
+    rng = np.random.default_rng(0)
+    df = pd.DataFrame({
+        "fcc23": rng.integers(0, 2, n),
+        "altitude": rng.normal(100, 10, n),
+        "slope": rng.normal(5, 1, n),
+        "dist_defor": rng.uniform(1, 1000, n),
+        "dist_edge": rng.uniform(1, 1000, n),
+        "dist_road": rng.uniform(1, 1000, n),
+        "dist_town": rng.uniform(1, 1000, n),
+        "dist_river": rng.uniform(1, 1000, n),
+        "protected": rng.integers(0, 2, n),
+        "cell": rng.integers(0, 10, n),
+    })
+    df.to_csv(output_dir / "sample.csv", index=False)
 
 
 def test_predict_risk_calls_far_and_returns_path(tmp_path):
     from palmdef_risk.model.predict import predict_risk
 
     ctx = _FakeCtx(tmp_path)
-    pkl_path, mod = _make_model_pkl(tmp_path)
+    _make_sample_csv(ctx.output_dir)
+    # predict_risk validates that each covariate raster exists on disk (existence
+    # check only — empty files satisfy it).
+    (ctx.data_dir / "altitude.tif").write_bytes(b"")
+    (ctx.data_dir / "protected.tif").write_bytes(b"")
 
-    with patch("forestatrisk.predict.predict_raster") as mock_pred:
+    formula = "I(1 - fcc23) + trial ~ scale(altitude) + protected + cell"
+    state = {"formula": formula, "betas": np.zeros(3), "rho": np.zeros(10)}
+    pkl_path = tmp_path / "mod_A.pkl"
+    with open(pkl_path, "wb") as fh:
+        pickle.dump(state, fh)
+
+    with patch("forestatrisk.icarModelPred") as m_pred, \
+         patch("forestatrisk.interpolate_rho") as m_interp, \
+         patch("forestatrisk.predict_raster_binomial_iCAR") as m_raster:
         result = predict_risk(ctx, pkl_path, "A")
 
-    mock_pred.assert_called_once()
+    m_pred.assert_called_once()
+    m_interp.assert_called_once()
+    m_raster.assert_called_once()
     assert result == ctx.output_dir / "predictions" / "risk_A.tif"
     assert (ctx.output_dir / "predictions").is_dir()
 

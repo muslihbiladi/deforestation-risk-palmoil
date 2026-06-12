@@ -180,11 +180,11 @@ def compute_all_distances(ctx: "RunContext") -> None:
     # ── Forecast distances (data/forecast/) ───────────────────────────────────
 
     for name, src, tgt in [
-        ("dist_edge",  "forest_t3.tif", 0),
-        ("dist_defor", "fcc23.tif",     0),
+        ("dist_edge_forecast",  "forest_t3.tif", 0),
+        ("dist_defor_forecast", "fcc23.tif",     0),
     ]:
         src_path = d / src
-        out_path = fcast / f"{name}.tif"
+        out_path = d / f"{name}.tif"
         if src_path.exists() and _needs_recompute(out_path, ref_shape):
             tasks.append(("raster", src_path, out_path, tgt))
 
