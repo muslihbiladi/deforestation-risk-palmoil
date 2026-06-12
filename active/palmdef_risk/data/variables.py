@@ -59,6 +59,7 @@ import os
 import json
 import math
 import time
+import requests
 import multiprocessing
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
@@ -946,6 +947,91 @@ def _geojson_to_gpkg(fc_dict, output_path, layer_name, verbose=True):
 
     if verbose:
         print(f"  Written {count} features to {output_path}")
+
+
+# ============================================================
+# BIG RBI river downloader (ArcGIS REST MapServer)
+# ============================================================
+
+# Rupa Bumi Indonesia 1:50,000 national basemap (public, no auth).
+_BIG_RBI_URL = (
+    "https://geoservices.big.go.id/rbi/rest/services/"
+    "BASEMAP/Rupabumi_Indonesia/MapServer"
+)
+_BIG_RIVER_LINE_LAYER = 237   # Sungai (Garis) — centrelines (polyline)
+_BIG_RIVER_AREA_LAYER = 257   # Sungai (area)  — wide rivers (polygon)
+_BIG_PAGE_SIZE = 1000         # service max records per query
+_BIG_UA = "palmdef_risk/1.0 (deforestation risk research; +https://www.wri.org)"
+
+
+def _big_query_layer(layer_id, bbox, timeout=180, verbose=True):
+    """Fetch all GeoJSON features from one BIG RBI MapServer layer in a bbox.
+
+    Geometry + OBJECTID only (dist_river uses presence, not attributes).
+    Paginates on resultOffset until the service stops setting
+    exceededTransferLimit. Both layers are requested with outSR=4326 so the
+    response geometry is already in EPSG:4326.
+
+    Raises RuntimeError if any page fails on every retry — the caller does NOT
+    fall back to OSM (the user explicitly chose source=big).
+
+    :param layer_id: BIG MapServer layer id (237 or 257).
+    :param bbox: (xmin, ymin, xmax, ymax) in EPSG:4326.
+    :return: list of GeoJSON feature dicts.
+    """
+    xmin, ymin, xmax, ymax = bbox
+    url = f"{_BIG_RBI_URL}/{layer_id}/query"
+    headers = {"User-Agent": _BIG_UA}
+    params = {
+        "geometry": f"{xmin},{ymin},{xmax},{ymax}",
+        "geometryType": "esriGeometryEnvelope",
+        "inSR": "4326",
+        "outSR": "4326",
+        "spatialRel": "esriSpatialRelIntersects",
+        "returnGeometry": "true",
+        "outFields": "OBJECTID",
+        "geometryPrecision": "5",
+        "resultRecordCount": _BIG_PAGE_SIZE,
+        "f": "geojson",
+    }
+
+    features = []
+    offset = 0
+    while True:
+        params["resultOffset"] = offset
+        data = None
+        for attempt in range(3):
+            try:
+                r = requests.get(url, params=params, headers=headers,
+                                 timeout=timeout + 30)
+                if r.status_code == 200:
+                    data = r.json()
+                    break
+                if r.status_code in (429, 503, 504) and attempt < 2:
+                    time.sleep(min(2 ** attempt, 10))
+                    continue
+                break  # other status — give up on this page
+            except Exception:
+                if attempt < 2:
+                    time.sleep(min(2 ** attempt, 10))
+                    continue
+        if data is None:
+            raise RuntimeError(
+                f"BIG RBI layer {layer_id} query failed at offset {offset} "
+                f"(no successful response after retries)."
+            )
+        page = data.get("features", []) or []
+        features.extend(page)
+        if verbose:
+            print(f"    BIG layer {layer_id}: +{len(page)} "
+                  f"(total {len(features)})")
+        exceeded = (data.get("properties", {}) or {}).get(
+            "exceededTransferLimit", False)
+        if not exceeded or len(page) < _BIG_PAGE_SIZE:
+            break
+        offset += _BIG_PAGE_SIZE
+        time.sleep(1)  # be polite to the public service
+    return features
 
 
 # ============================================================
