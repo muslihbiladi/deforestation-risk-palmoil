@@ -37,7 +37,7 @@ class RunConfig:
     plantation_t3: Optional[str]
     plantation_industrial_value: int
     plantation_smallholder_value: int
-    river_source: str
+    river_source: str  # "big", "osm", or "user"; "user" requires river_path
     river_path: Optional[str]
     # GEE
     gee_project: Optional[str]  # Google Earth Engine cloud project ID
