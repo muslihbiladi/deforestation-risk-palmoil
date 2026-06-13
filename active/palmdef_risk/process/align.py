@@ -11,7 +11,6 @@ import shutil
 import numpy as np
 from osgeo import gdal, gdalconst
 
-import forestatrisk as far
 from palmdef_risk.io.run import RunContext
 from palmdef_risk.io.helpers import (
     get_mask_properties, reproject_raster, reproject_raster_to_match,
@@ -260,65 +259,6 @@ def align_all(ctx: RunContext, inputs: dict | None = None, force: bool = False) 
             rasterize_vector(str(mill_to_burn), str(out), 1, mask_props)
             apply_mask(str(out), mask_props["invalid_mask"])
         result["mill"] = out
-
-    return result
-
-
-def compute_all_distances(ctx: RunContext, force: bool = False) -> dict[str, Path]:
-    """Compute all distance rasters via forestatrisk.data.compute.compute_distance().
-
-    Reads aligned rasters from ctx.data_dir. Writes dist_*.tif back to ctx.data_dir.
-    Skips any dist_*.tif that already exists unless force=True.
-    """
-    d = ctx.data_dir
-    result: dict[str, Path] = {}
-
-    def _dist(input_file: Path, dist_file: Path, values: int = 0) -> Path:
-        if not force and dist_file.exists():
-            log.info("  skip (exists): %s", dist_file.name)
-            return dist_file
-        log.info("  Computing distance: %s", dist_file.name)
-        far.data.compute.compute_distance(
-            input_file=str(input_file),
-            dist_file=str(dist_file),
-            values=values,
-            input_nodata=True,
-            verbose=False,
-        )
-        return dist_file
-
-    if (d / "forest_t2.tif").exists():
-        result["dist_edge"] = _dist(d / "forest_t2.tif", d / "dist_edge.tif")
-    if (d / "fcc12.tif").exists():
-        result["dist_defor"] = _dist(d / "fcc12.tif", d / "dist_defor.tif")
-    if (d / "road.tif").exists():
-        result["dist_road"] = _dist(d / "road.tif", d / "dist_road.tif")
-    if (d / "river.tif").exists():
-        result["dist_river"] = _dist(d / "river.tif", d / "dist_river.tif")
-    if (d / "town.tif").exists():
-        result["dist_town"] = _dist(d / "town.tif", d / "dist_town.tif")
-    if (d / f"{_PROTECTED_FILENAME}.tif").exists():
-        result["dist_protected"] = _dist(
-            d / f"{_PROTECTED_FILENAME}.tif", d / f"dist_{_PROTECTED_FILENAME}.tif")
-    if (d / "mill.tif").exists():
-        result["dist_mill"] = _dist(d / "mill.tif", d / "dist_mill.tif")
-    if (d / "plantation.tif").exists():
-        result["dist_plantation_edge"] = _dist(
-            d / "plantation.tif", d / "dist_plantation_edge.tif")
-
-    if (d / "forest_t3.tif").exists():
-        result["dist_edge_forecast"] = _dist(
-            d / "forest_t3.tif", d / "dist_edge_forecast.tif")
-    if (d / "fcc23.tif").exists():
-        result["dist_defor_forecast"] = _dist(
-            d / "fcc23.tif", d / "dist_defor_forecast.tif")
-
-    plant_t3_aligned = ctx.data_dir / "plantation_t3.tif"
-    if plant_t3_aligned.exists():
-        result["dist_plantation_edge_forecast"] = _dist(
-            plant_t3_aligned, d / "dist_plantation_edge_forecast.tif")
-    else:
-        log.info("  dist_plantation_edge_forecast skipped (no plantation_t3)")
 
     return result
 
