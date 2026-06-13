@@ -125,26 +125,27 @@ Outputs land in `ctx.data_dir` as `{name}.tif`.
 
 ### 3.2 Distance calculation logic (`compute_all_distances`)
 
-Distances are Euclidean distance transforms computed by
-`forestatrisk.data.compute.compute_distance()`. The critical parameter is
-**`values`**, which selects what the distance is measured *to*:
+Distances are Euclidean distance transforms in metres, computed by
+`gdal.ComputeProximity` (`DISTUNITS=GEO`; see `process/distances.py`). The
+critical parameter is **`target_value`**, which selects what the distance is
+measured *to*:
 
-- **`values=0`** — distance to non-feature / background pixels. Used for
+- **`target_value=0`** — distance to non-feature / background pixels. Used for
   *edge* and *deforestation* surfaces, where the meaningful gradient is the
   approach toward already-cleared land:
   `dist_edge` (from `forest_t2`), `dist_defor` (from `fcc12`), and their
-  `*_forecast` variants from t3 layers.
-- **`values=1`** — distance to the nearest **feature** pixel. Used for all
-  presence rasters: `dist_road`, `dist_river`, `dist_town`, `dist_mill`,
-  `dist_plantation_edge`, `dist_ghsl_built`. With `values=0` these would
+  forecast variants (`forecast/dist_*`, from `forest_t3` / `fcc23`).
+- **`target_value=1`** — distance to the nearest **feature** pixel. Used for the
+  presence rasters: `dist_road`, `dist_river`, `dist_town`,
+  `dist_plantation_edge`. (`dist_town` falls back to the GHSL built-up raster
+  when no OSM town vector is present.) With `target_value=0` these would
   measure distance *away from* non-features and be meaningless.
 
-A self-repair guard (`_repair_zero_variance_raster`) detects a `dist_mill.tif`
-accidentally produced with `values=0` — its non-NoData pixels have near-zero
-variance — deletes it, and recomputes with `values=1`.
+`dist_mill` is **not** computed here — mill proximity enters the model only
+through `gravity_resid` (§3.3), never as a direct distance covariate.
 
-Forecast distances (`dist_*_forecast`) repeat the same logic on t3 inputs to
-support future projection. All distances run in parallel (§6).
+Forecast distances (under `data/forecast/`) repeat the same logic on t3 inputs
+to support future projection. All distances run in parallel (§6).
 
 ### 3.3 Gravity-weighted mill accessibility (orthogonalized)
 
