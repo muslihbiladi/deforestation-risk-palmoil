@@ -105,7 +105,13 @@ NEVER use `pa` or `pa_status` — causes patsy formula parsing errors in iCAR fi
   reused across all runs. Availability checked at Stage 1 only when `source=download`.
 
 ## Gravity implementation
-- `A_i = Σ_m exp(-d²(i,m)/2σ²)` as `scipy.ndimage.gaussian_filter` on mill density raster.
+- `A_i = Σ_m exp(-d²(i,m)/2σ²)` over mills **within `radius_km`** — a Gaussian
+  kernel truncated to a circular `radius_km` catchment, convolved over the
+  mill-density raster via `scipy.signal.oaconvolve` (area-normalized; mills
+  beyond `radius_km` contribute exactly 0). `radius_km` is config-validated
+  `> sigma_km`. A full-support kernel would leak ≈14 % of its mass past 2σ
+  (e.g. σ=40 km / radius=80 km in the bandwidth sweep) — truncation prevents
+  the catchment silently growing with σ.
 - NOT a per-pixel loop.
 - `gravity_resid = A_i - OLS(A_i ~ dist_road + dist_town)` — residual is the covariate.
 

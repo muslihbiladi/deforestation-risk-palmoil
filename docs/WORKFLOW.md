@@ -162,9 +162,13 @@ filtered to Indonesia (≈600–800 mills).
 A_i = Σ_m exp(-d²(i,m) / 2σ²)
 ```
 
-summed over every mill *m* within 80 km, with σ = 25 km. In Python this is
-implemented as a distance transform plus a Gaussian filter applied to a
-mill-density raster, rather than a per-pixel loop over mills.
+summed over every mill *m* within `radius_km` (default 80 km), with σ = 25 km.
+In Python this is a Gaussian kernel **truncated at `radius_km`** — a circular
+catchment; mills beyond it contribute exactly 0 — convolved over a mill-density
+raster via overlap-add FFT (`scipy.signal.oaconvolve`), rather than a per-pixel
+loop over mills. The truncation keeps the 80 km catchment fixed as σ varies in
+the bandwidth sweep (§4.5); a full-support kernel would leak ≈14 % of its mass
+beyond 80 km at σ = 40 km.
 
 **Orthogonalization.** `A_i` is partly redundant with generic infrastructure
 proximity. It is therefore regressed on the pixel sample against road and

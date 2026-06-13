@@ -5,7 +5,7 @@ from typing import TYPE_CHECKING
 
 import numpy as np
 from osgeo import gdal
-from scipy.fft import rfft2, irfft2
+from scipy.signal import oaconvolve
 
 if TYPE_CHECKING:
     from palmdef_risk.io.run import RunContext
@@ -19,32 +19,47 @@ def _apply_gaussian_filter(
     sigma_km: float,
     radius_km: float,
 ) -> None:
-    """Gaussian kernel accessibility: FFT convolution of mill density with Gaussian kernel.
+    """Gaussian-kernel accessibility surface, truncated at radius_km.
 
-    Uses rfft2/irfft2 (O(N log N)) rather than spatial convolution (O(N * sigma_px)),
-    which is ~100-200x faster when sigma spans hundreds of pixels.
+    A_i = Σ over mills m with d(i,m) ≤ radius_km of exp(-d²/2σ²) (WORKFLOW §3.3,
+    pre-registered "within 80 km"). The Gaussian kernel is zeroed beyond
+    radius_km — a hard *circular* catchment — so mills past radius_km contribute
+    exactly 0. A full-support kernel instead leaks its tail (≈14 % of the kernel
+    mass sits beyond 2σ, e.g. at the sensitivity-sweep bandwidth σ=40 km with
+    radius=80 km), silently widening the catchment as σ grows.
+
+    Overlap-add FFT convolution (`scipy.signal.oaconvolve`): O(N log N) with
+    bounded memory, and a *linear* (zero-padded) convolution — no frequency-
+    domain wrap-around. The kernel is area-normalized (Σ=1), matching the
+    previous DC-gain-1 FFT, so where the catchment covers the full support
+    (small σ) the result matches the untruncated method; only the large-σ tail
+    is removed.
     """
     ds = gdal.Open(str(mill_raster))
-    arr = ds.GetRasterBand(1).ReadAsArray().astype(np.float32)
+    arr = ds.GetRasterBand(1).ReadAsArray().astype(np.float64)
     gt = ds.GetGeoTransform()
     proj = ds.GetProjection()
     pixel_size_m = abs(gt[1])
     ds = None
 
     sigma_px = (sigma_km * 1000.0) / pixel_size_m
+    radius_px = int(np.ceil((radius_km * 1000.0) / pixel_size_m))
+
+    # Circular Gaussian kernel, zeroed beyond radius_px (the hard catchment).
+    offs = np.arange(-radius_px, radius_px + 1, dtype=np.float64)
+    yy, xx = np.meshgrid(offs, offs, indexing="ij")
+    d2 = xx ** 2 + yy ** 2  # squared pixel distance from kernel centre
+    kernel = np.exp(-d2 / (2.0 * sigma_px ** 2))
+    kernel[d2 > radius_px ** 2] = 0.0
+    kernel /= kernel.sum()  # area-normalize (matches prior DC-gain-1 FFT)
 
     ny, nx = arr.shape
-    fy = np.fft.fftfreq(ny).astype(np.float64)[:, np.newaxis]
-    fx = np.fft.rfftfreq(nx).astype(np.float64)[np.newaxis, :]
-    kernel_f = np.exp(-2.0 * np.pi ** 2 * sigma_px ** 2 * (fy ** 2 + fx ** 2))
-
-    arr_f = rfft2(arr.astype(np.float64))
-    arr_f *= kernel_f
-    result = np.clip(irfft2(arr_f, s=(ny, nx)), 0.0, None).astype(np.float32)
+    result = np.clip(oaconvolve(arr, kernel, mode="same"), 0.0, None).astype(np.float32)
 
     logger.info(
-        "Gaussian filter applied (FFT): sigma=%.1f km (%.0f px), raster=%dx%d",
-        sigma_km, sigma_px, nx, ny,
+        "Gaussian filter applied (truncated): sigma=%.1f km (%.0f px), "
+        "radius=%.1f km (%d px), raster=%dx%d",
+        sigma_km, sigma_px, radius_km, radius_px, nx, ny,
     )
     out_ds = gdal.GetDriverByName("GTiff").Create(
         str(out_path), nx, ny, 1, gdal.GDT_Float32,
