@@ -303,7 +303,7 @@ def predict_forecast(ctx: RunContext, model_path: Path, variant: str) -> Optiona
 
     # Build derived rasters INTO the forecast dir (from t3 dist_* + copied statics).
     _create_log_dist_rasters(fcast, state["formula"])
-    _create_hgu_spline_rasters(fcast, state["formula"])
+    _create_hgu_spline_rasters(fcast, state["formula"], sample_path)
 
     # Guard: every scaled covariate + protected must exist in the forecast var_dir.
     bare_covs = {"protected"}
