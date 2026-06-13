@@ -58,16 +58,24 @@ def _create_log_dist_rasters(data_dir: Path, formula: str) -> None:
         logger.info("Created log raster: %s", log_path.name)
 
 
-def _create_hgu_spline_rasters(data_dir: Path, formula: str) -> None:
+def _create_hgu_spline_rasters(data_dir: Path, formula: str, sample_path: Path) -> None:
     """Write hgu_b1.tif and hgu_b2.tif from hgu_signed_dist.tif for variant C prediction.
 
     forestatrisk reads covariates by filename, so the spline basis columns used
     during training must exist as raster files.  Only missing files are created.
+
+    The cr() basis is rebuilt from the SAME training sample patsy memorized at fit
+    time (boundary + interior knots), then applied to the full raster via
+    build_design_matrices.  This guarantees the prediction basis matches the fitted
+    betas, and — because the memorized knots are reused — lets us evaluate the raster
+    in chunks without patsy re-deriving (and rejecting) knots per chunk.  Evaluating
+    all ~288M valid pixels in one dmatrix call allocates a ~10 GB (n_knots, N) temp
+    and OOMs; chunking caps the temp at a few hundred MB.
     """
     if "hgu_b1" not in formula and "hgu_b2" not in formula:
         return
     from osgeo import gdal
-    from patsy import dmatrix
+    from patsy import dmatrix, build_design_matrices
 
     src_path = data_dir / "hgu_signed_dist.tif"
     if not src_path.exists():
@@ -77,6 +85,16 @@ def _create_hgu_spline_rasters(data_dir: Path, formula: str) -> None:
     needed = [n for n in ("hgu_b1", "hgu_b2") if n in formula and not (data_dir / f"{n}.tif").exists()]
     if not needed:
         return
+
+    # Recover the trained spline state: patsy cr() memorizes boundary knots from the
+    # sample's data range during fit. Rebuilding from sample.csv reproduces exactly
+    # that state so build_design_matrices reuses it (no per-chunk knot re-derivation).
+    train_hgu = pd.read_csv(sample_path)["hgu_signed_dist"].to_numpy(dtype=np.float64)
+    train_hgu = train_hgu[~np.isnan(train_hgu)]
+    design_info = dmatrix(
+        "cr(x, knots=(-5000, 0, 5000)) - 1", {"x": train_hgu}, return_type="matrix"
+    ).design_info
+    n_basis = len(design_info.column_names)
 
     ds = gdal.Open(str(src_path))
     band = ds.GetRasterBand(1)
@@ -88,18 +106,32 @@ def _create_hgu_spline_rasters(data_dir: Path, formula: str) -> None:
     ds = None
 
     valid = (arr != nodata) if nodata is not None else np.ones((ny, nx), dtype=bool)
-    dm_arr = np.asarray(
-        dmatrix("cr(x, knots=(-5000, 0, 5000)) - 1", {"x": arr[valid].ravel()},
-                return_type="matrix")
-    )
+    x_valid = arr[valid].ravel()
+    del arr  # free full raster; valid mask is sufficient for scatter-write
+    n_valid = len(x_valid)
+
+    # Only hgu_b1/hgu_b2 (basis cols 0/1) feed the model — materialise just those,
+    # not all n_basis full-length columns. Apply the memorized basis in 5M-pixel
+    # chunks to avoid the ~10 GB monolithic temp.
+    want_idx = sorted({min(("hgu_b1", "hgu_b2").index(n), n_basis - 1) for n in needed})
+    _CHUNK = 5_000_000
+    dm_cols = {j: np.empty(n_valid, dtype=np.float32) for j in want_idx}
+    for start in range(0, n_valid, _CHUNK):
+        end = min(start + _CHUNK, n_valid)
+        chunk = np.asarray(
+            build_design_matrices([design_info], {"x": x_valid[start:end]})[0]
+        )
+        for j in want_idx:
+            dm_cols[j][start:end] = chunk[:, j].astype(np.float32)
+    del x_valid
 
     for i, name in enumerate(("hgu_b1", "hgu_b2")):
         if name not in needed:
             continue
         out_path = data_dir / f"{name}.tif"
-        col_idx = min(i, dm_arr.shape[1] - 1)
+        col_idx = min(i, n_basis - 1)
         out_arr = np.full((ny, nx), -9999.0, dtype=np.float32)
-        out_arr[valid] = dm_arr[:, col_idx].astype(np.float32)
+        out_arr[valid] = dm_cols[col_idx]
 
         out_ds = gdal.GetDriverByName("GTiff").Create(
             str(out_path), nx, ny, 1, gdal.GDT_Float32,
@@ -170,7 +202,7 @@ def predict_risk(ctx: RunContext, model_path: Path, variant: str) -> Path:
     # forestatrisk reads variable rasters by filename; create derived rasters
     # (log-distances, HGU spline basis) before calling predict.
     _create_log_dist_rasters(ctx.data_dir, state["formula"])
-    _create_hgu_spline_rasters(ctx.data_dir, state["formula"])
+    _create_hgu_spline_rasters(ctx.data_dir, state["formula"], sample_path)
 
     # Validate that every covariate raster exists before handing off to forestatrisk.
     # A missing raster causes forestatrisk to silently process 0 pixels → cryptic
@@ -210,6 +242,11 @@ def predict_all(ctx: RunContext) -> list[Path]:
         model_path = ctx.output_dir / "models" / f"model_{variant}" / f"mod_{variant}.pkl"
         if not model_path.exists():
             logger.warning("Model pkl not found, skipping variant %s: %s", variant, model_path)
+            continue
+        risk_path = ctx.output_dir / "predictions" / f"risk_{variant}.tif"
+        if risk_path.exists():
+            logger.info("risk_%s.tif exists — skipping prediction", variant)
+            results.append(risk_path)
             continue
         try:
             risk_path = predict_risk(ctx, model_path, variant)

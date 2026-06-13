@@ -10,14 +10,14 @@ Outputs:
 
     Vectors (GeoPackage):
         - protected.gpkg   : Protected area polygons (WDPA via GEE)
-        - road.gpkg        : Road network lines (OSM via osmnx)
-        - river.gpkg       : Waterway lines (OSM via osmnx)
-        - town.gpkg        : Settlement points (OSM via osmnx)
+        - road.gpkg        : Road network lines (OSM via Overpass API)
+        - river.gpkg       : Waterway lines (OSM via Overpass API)
+        - town.gpkg        : Settlement points (OSM via Overpass API)
 
 Data sources:
     - NASA SRTM 30m (USGS)    -> GEE: USGS/SRTMGL1_003
     - WDPA (Protected Planet) -> GEE: WCMC/WDPA/current/polygons
-    - OpenStreetMap            -> osmnx (features_from_polygon)
+    - OpenStreetMap            -> Overpass API (tiled bbox queries)
 
 The AOI is defined by the user as either an extent tuple
 (xmin, ymin, xmax, ymax) or a vector file (GPKG/SHP/GeoJSON).
@@ -59,6 +59,7 @@ import os
 import json
 import math
 import time
+import requests
 import multiprocessing
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
@@ -949,15 +950,312 @@ def _geojson_to_gpkg(fc_dict, output_path, layer_name, verbose=True):
 
 
 # ============================================================
+# BIG RBI river downloader (ArcGIS REST MapServer)
+# ============================================================
+
+# Rupa Bumi Indonesia 1:50,000 national basemap (public, no auth).
+_BIG_RBI_URL = (
+    "https://geoservices.big.go.id/rbi/rest/services/"
+    "BASEMAP/Rupabumi_Indonesia/MapServer"
+)
+_BIG_RIVER_LINE_LAYER = 237   # Sungai (Garis) — centrelines (polyline)
+_BIG_RIVER_AREA_LAYER = 257   # Sungai (area)  — wide rivers (polygon)
+_BIG_PAGE_SIZE = 1000         # service max records per query
+_BIG_UA = "palmdef_risk/1.0 (deforestation risk research; +https://www.wri.org)"
+
+
+def _big_query_layer(layer_id, bbox, timeout=180, verbose=True):
+    """Fetch all GeoJSON features from one BIG RBI MapServer layer in a bbox.
+
+    Geometry + OBJECTID only (dist_river uses presence, not attributes).
+    Paginates on resultOffset until the service stops setting
+    exceededTransferLimit. Both layers are requested with outSR=4326 so the
+    response geometry is already in EPSG:4326.
+
+    Raises RuntimeError if any page fails on every retry — the caller does NOT
+    fall back to OSM (the user explicitly chose source=big).
+
+    :param layer_id: BIG MapServer layer id (237 or 257).
+    :param bbox: (xmin, ymin, xmax, ymax) in EPSG:4326.
+    :return: list of GeoJSON feature dicts.
+    """
+    xmin, ymin, xmax, ymax = bbox
+    url = f"{_BIG_RBI_URL}/{layer_id}/query"
+    headers = {"User-Agent": _BIG_UA}
+    params = {
+        "geometry": f"{xmin},{ymin},{xmax},{ymax}",
+        "geometryType": "esriGeometryEnvelope",
+        "inSR": "4326",
+        "outSR": "4326",
+        "spatialRel": "esriSpatialRelIntersects",
+        "returnGeometry": "true",
+        "outFields": "OBJECTID",
+        "geometryPrecision": "5",
+        "resultRecordCount": _BIG_PAGE_SIZE,
+        "f": "geojson",
+    }
+
+    features = []
+    offset = 0
+    while True:
+        params["resultOffset"] = offset
+        data = None
+        for attempt in range(3):
+            try:
+                r = requests.get(url, params=params, headers=headers,
+                                 timeout=timeout + 30)
+                if r.status_code == 200:
+                    data = r.json()
+                    break
+                if r.status_code in (429, 503, 504) and attempt < 2:
+                    time.sleep(min(2 ** attempt, 10))
+                    continue
+                break  # other status — give up on this page
+            except Exception:
+                if attempt < 2:
+                    time.sleep(min(2 ** attempt, 10))
+                    continue
+        if data is None:
+            raise RuntimeError(
+                f"BIG RBI layer {layer_id} query failed at offset {offset} "
+                f"(no successful response after retries)."
+            )
+        page = data.get("features", []) or []
+        features.extend(page)
+        if verbose:
+            print(f"    BIG layer {layer_id}: +{len(page)} "
+                  f"(total {len(features)})")
+        exceeded = data.get("exceededTransferLimit", False)
+        if len(page) < _BIG_PAGE_SIZE and not exceeded:
+            break
+        offset += _BIG_PAGE_SIZE
+        time.sleep(1)  # be polite to the public service
+    return features
+
+
+def get_rivers_big(aoi, output_dir="data", buff=0.0, output_crs=None,
+                   timeout=180, verbose=True):
+    """Download river features from BIG RBI (Layers 237 lines + 257 polygons).
+
+    Fetches geometry only, merges both layers into one generic-geometry
+    GeoDataFrame, clips to the AOI polygon, optionally reprojects to
+    output_crs, and writes <output_dir>/river.gpkg. Wide-river polygons (257)
+    are kept as polygons: process/distances.py burns them as a presence area,
+    which is the correct representation for dist_river.
+
+    Hard-fails (RuntimeError, raised by _big_query_layer) if the BIG service
+    cannot be reached — no silent OSM fallback.
+
+    Signature mirrors get_rivers() so download_variables can dispatch with the
+    same kwargs. Returns {"river": path}.
+    """
+    from shapely.geometry import shape
+
+    if verbose:
+        print("=" * 60)
+        print("Downloading BIG RBI rivers (Layers 237 + 257)...")
+
+    os.makedirs(output_dir, exist_ok=True)
+    polygon = _load_aoi_polygon(aoi, buff)
+    bbox = polygon.bounds  # (xmin, ymin, xmax, ymax) in EPSG:4326
+    gpkg_path = os.path.join(output_dir, "river.gpkg")
+
+    geoms = []
+    for layer_id in (_BIG_RIVER_LINE_LAYER, _BIG_RIVER_AREA_LAYER):
+        feats = _big_query_layer(layer_id, bbox, timeout=timeout,
+                                 verbose=verbose)
+        for ft in feats:
+            g = ft.get("geometry")
+            if g:
+                geoms.append(shape(g))
+
+    if not geoms:
+        if verbose:
+            print("  No BIG river features in AOI — writing empty river.gpkg.")
+        _create_empty_gpkg(gpkg_path, ogr.wkbLineString)
+        return {"river": gpkg_path}
+
+    gdf = gpd.GeoDataFrame(geometry=geoms, crs="EPSG:4326")
+
+    # Clip to the AOI polygon (in EPSG:4326 before reprojection)
+    aoi_gdf = gpd.GeoDataFrame(geometry=[polygon], crs="EPSG:4326")
+    before = len(gdf)
+    gdf = gpd.clip(gdf, aoi_gdf)
+    gdf = gdf[~gdf.geometry.is_empty & gdf.geometry.notna()]
+    if verbose:
+        print(f"  Clipped to AOI: {before} -> {len(gdf)} features")
+
+    if gdf.empty:
+        _create_empty_gpkg(gpkg_path, ogr.wkbLineString)
+        return {"river": gpkg_path}
+
+    if output_crs is not None:
+        gdf = gdf.to_crs(output_crs)
+
+    if os.path.exists(gpkg_path):
+        os.remove(gpkg_path)
+    gdf.to_file(gpkg_path, driver="GPKG")
+
+    if verbose:
+        print(f"  {len(gdf)} features -> {gpkg_path}")
+    return {"river": gpkg_path}
+
+
+# ============================================================
 # osmnx-based OSM downloader
 # ============================================================
+
+# Public Overpass endpoints, tried in order. A proper User-Agent is REQUIRED:
+# overpass-api.de's mod_security returns 406 to requests without one.
+_OVERPASS_ENDPOINTS = (
+    "https://overpass-api.de/api/interpreter",
+    "https://overpass.kumi.systems/api/interpreter",
+    "https://overpass.openstreetmap.fr/api/interpreter",
+)
+_OVERPASS_UA = "palmdef_risk/1.0 (deforestation risk research; +https://www.wri.org)"
+
+# Target tile edge in degrees. Large AOIs are split into a grid so each Overpass
+# request stays well under the ~30-60s gateway timeout that fronts public servers
+# (a single 34,000 km² roads query is ~50 MB and straddles that limit, yielding 504s).
+_OSM_TILE_DEG = 1.0
+
+# A dense tile can still exceed the gateway timeout. When a tile fails on every
+# endpoint, it is split into 4 quadrants and retried, recursively, up to this depth.
+# Depth 3 lets one base tile fan out to at most 4³ = 64 sub-tiles before giving up.
+_OSM_MAX_SPLIT_DEPTH = 3
+
+
+def _osm_tag_filter(tags):
+    """Convert a tags dict to an Overpass tag-filter string.
+
+    {"highway": [...]}     -> ["highway"~"^(a|b|c)$"]
+    {"waterway": True}     -> ["waterway"]
+    {"place": ["city",..]} -> ["place"~"^(city|...)$"]
+    """
+    parts = []
+    for key, val in tags.items():
+        if val is True:
+            parts.append(f'["{key}"]')
+        elif isinstance(val, (list, tuple, set)):
+            alt = "|".join(str(v) for v in val)
+            parts.append(f'["{key}"~"^({alt})$"]')
+        else:
+            parts.append(f'["{key}"="{val}"]')
+    return "".join(parts)
+
+
+def _overpass_post(query, server_timeout):
+    """POST an Overpass QL query, trying each endpoint until one returns 200.
+
+    Returns parsed JSON dict, or None if every endpoint failed.
+    """
+    import requests
+
+    data = {"data": query}
+    headers = {"User-Agent": _OVERPASS_UA}
+    for url in _OVERPASS_ENDPOINTS:
+        for attempt in range(2):  # one retry per endpoint (handles transient 429/504)
+            try:
+                r = requests.post(url, data=data, headers=headers,
+                                  timeout=server_timeout + 30)
+                if r.status_code == 200:
+                    return r.json()
+                # 429 (rate limit) / 504 (gateway) are worth a brief backoff-retry
+                if r.status_code in (429, 504) and attempt == 0:
+                    time.sleep(5)
+                    continue
+                break  # other status (403/406/400) — move to next endpoint
+            except Exception:
+                if attempt == 0:
+                    time.sleep(3)
+                    continue
+                break
+    return None
+
+
+def _osm_tiles(xmin, ymin, xmax, ymax, tile_deg=_OSM_TILE_DEG):
+    """Yield (s, w, n, e) sub-bboxes covering the extent in a grid of ~tile_deg cells."""
+    ncols = max(1, math.ceil((xmax - xmin) / tile_deg))
+    nrows = max(1, math.ceil((ymax - ymin) / tile_deg))
+    dx = (xmax - xmin) / ncols
+    dy = (ymax - ymin) / nrows
+    for i in range(ncols):
+        for j in range(nrows):
+            w = xmin + i * dx
+            e = xmin + (i + 1) * dx
+            s = ymin + j * dy
+            n = ymin + (j + 1) * dy
+            yield (s, w, n, e)
+
+
+def _parse_osm_elements(data, want_points):
+    """Convert Overpass JSON elements into shapely geometries."""
+    from shapely.geometry import LineString, Point
+    geoms = []
+    for el in data.get("elements", []):
+        if want_points:
+            if "lat" in el and "lon" in el:
+                geoms.append(Point(el["lon"], el["lat"]))
+        else:
+            coords = [(p["lon"], p["lat"]) for p in el.get("geometry", [])]
+            if len(coords) >= 2:
+                geoms.append(LineString(coords))
+    return geoms
+
+
+def _fetch_osm_geoms(s, w, n, e, element, tag_filter, out_clause,
+                     server_timeout, want_points, depth, verbose, label):
+    """Fetch one bbox tile; on total failure, split into 4 quadrants and recurse.
+
+    A failed tile is usually too dense for the gateway timeout — quartering it
+    shrinks each request until it fits. Returns (geoms_list, failed_leaf_count).
+    """
+    query = (f"[out:json][timeout:{server_timeout}];"
+             f"({element}{tag_filter}({s},{w},{n},{e}););{out_clause}")
+    data = _overpass_post(query, server_timeout)
+    if data is not None:
+        geoms = _parse_osm_elements(data, want_points)
+        if verbose:
+            print(f"    tile {label}: +{len(geoms)} features")
+        time.sleep(1)  # be polite to shared public servers
+        return geoms, 0
+
+    if depth >= _OSM_MAX_SPLIT_DEPTH:
+        if verbose:
+            print(f"    tile {label}: FAILED (max split depth reached)")
+        return [], 1
+
+    if verbose:
+        print(f"    tile {label}: failed, splitting into 4 quadrants...")
+    midx = (w + e) / 2.0
+    midy = (s + n) / 2.0
+    quads = (
+        (s, w, midy, midx),       # SW
+        (s, midx, midy, e),       # SE
+        (midy, w, n, midx),       # NW
+        (midy, midx, n, e),       # NE
+    )
+    geoms, failed = [], 0
+    for k, (qs, qw, qn, qe) in enumerate(quads, 1):
+        g, f = _fetch_osm_geoms(qs, qw, qn, qe, element, tag_filter, out_clause,
+                                server_timeout, want_points, depth + 1,
+                                verbose, f"{label}.{k}")
+        geoms.extend(g)
+        failed += f
+    return geoms, failed
+
 
 def _download_osm_osmnx(name, tags, keep_geom_types,
                         aoi, output_dir, buff, output_crs,
                         timeout, verbose):
-    """Download OSM features via osmnx, clip to AOI polygon, write to GPKG."""
-    import osmnx as ox
+    """Download OSM features via the Overpass API directly (tiled), clip to AOI, write GPKG.
 
+    Replaces the former osmnx path: osmnx's DNS pinning + rate-limit pre-flight
+    hung on some networks, and its polygon mode sent a 3,989-vertex `poly:` filter
+    that triggered 413/timeout. We query the bbox in ~1° tiles with a proper
+    User-Agent; any tile that still fails is recursively quartered until it fits
+    (see _fetch_osm_geoms), then results are clipped to the AOI polygon client-side.
+    """
     os.makedirs(output_dir, exist_ok=True)
 
     polygon = _load_aoi_polygon(aoi, buff)
@@ -966,40 +1264,38 @@ def _download_osm_osmnx(name, tags, keep_geom_types,
     if verbose:
         print(f"  AOI extent: {xmax - xmin:.2f} x {ymax - ymin:.2f} deg")
 
-    # Configure request timeout
-    try:
-        ox.settings.requests_timeout = timeout   # osmnx >= 2.0
-    except AttributeError:
-        ox.settings.timeout = timeout             # osmnx < 2.0
+    # Point features (towns) come from nodes; lines (roads/rivers) from ways.
+    want_points = "Point" in keep_geom_types
+    element = "node" if want_points else "way"
+    tag_filter = _osm_tag_filter(tags)
+    out_clause = "out;" if want_points else "out geom;"
+    server_timeout = min(int(timeout), 180)
 
-    try:
-        try:
-            gdf = ox.features_from_polygon(polygon, tags=tags)
-        except AttributeError:
-            gdf = ox.geometries_from_polygon(polygon, tags=tags)  # osmnx < 1.0
-    except Exception as e:
-        if verbose:
-            print(f"  osmnx returned no features: {e}")
-        return {}
+    tiles = list(_osm_tiles(xmin, ymin, xmax, ymax))
+    if verbose:
+        print(f"  Querying Overpass in {len(tiles)} tile(s)...")
 
-    if gdf is None or gdf.empty:
+    geoms = []
+    failed = 0
+    for idx, (s, w, n, e) in enumerate(tiles, 1):
+        g, f = _fetch_osm_geoms(s, w, n, e, element, tag_filter, out_clause,
+                                server_timeout, want_points, depth=0,
+                                verbose=verbose, label=f"{idx}/{len(tiles)}")
+        geoms.extend(g)
+        failed += f
+
+    if failed and verbose:
+        print(f"  WARNING: {failed} sub-tile(s) failed after splitting — output may be incomplete.")
+
+    if not geoms:
         if verbose:
             print(f"  No {name} features found.")
         return {}
 
-    # Filter to required geometry types and drop all OSM attribute columns
-    gdf = gdf[gdf.geometry.geom_type.isin(keep_geom_types)].copy()
-    if gdf.empty:
-        if verbose:
-            print(f"  No {name} features with geometry {keep_geom_types}.")
-        return {}
-
-    gdf = gpd.GeoDataFrame(geometry=gdf.geometry.values, crs=gdf.crs)
+    gdf = gpd.GeoDataFrame(geometry=geoms, crs="EPSG:4326")
 
     # Clip to AOI polygon (in EPSG:4326 before reprojection)
     aoi_gdf = gpd.GeoDataFrame(geometry=[polygon], crs="EPSG:4326")
-    if gdf.crs is None:
-        gdf = gdf.set_crs("EPSG:4326")
     before = len(gdf)
     gdf = gpd.clip(gdf, aoi_gdf)
     gdf = gdf[~gdf.geometry.is_empty & gdf.geometry.notna()]
@@ -1244,8 +1540,9 @@ def _variables_complete(out_dir, cfg) -> bool:
         out_dir / f"{_WDPA_OUTPUT_NAME}.gpkg",
         out_dir / "road.gpkg",
     ]
-    # river: skip check if user supplies their own file
-    if not getattr(cfg, "river_path", None):
+    # river: required unless the user supplies their own file
+    # (user file lives in user_inputs/, not variables/)
+    if cfg.river_source != "user":
         required.append(out_dir / "river.gpkg")
     # town: OSM point file OR both GHSL rasters
     if cfg.use_ghsl_towns:
@@ -1272,16 +1569,20 @@ def download_variables(ctx: RunContext, use_cache: bool = True) -> dict:
 
     _bbox = aoi_bbox_4326(cfg.aoi_source)
     _cm = CacheManager(cfg.cache_dir)
-    _vkey = _cm.variables_key(_bbox, cfg.aoi_buffer, cfg.use_ghsl_towns, cfg.ghsl_years, cfg.osm_timeout)
+    _vkey = _cm.variables_key(_bbox, cfg.aoi_buffer, cfg.use_ghsl_towns,
+                              cfg.ghsl_years, cfg.osm_timeout, cfg.river_source)
 
     if use_cache and _cm.variables_valid(_vkey, list(_bbox)):
         _cache_d = _cm.variables_dir(_vkey)
-        out_dir.mkdir(parents=True, exist_ok=True)
-        for _f in _cache_d.iterdir():
-            if _f.name != "metadata.json":
-                shutil.copy2(_f, out_dir / _f.name)
-        print("Variables: loaded from cross-run cache.")
-        return {}
+        if _variables_complete(_cache_d, cfg):
+            out_dir.mkdir(parents=True, exist_ok=True)
+            for _f in _cache_d.iterdir():
+                if _f.name != "metadata.json":
+                    shutil.copy2(_f, out_dir / _f.name)
+            print("Variables: loaded from cross-run cache.")
+            return {}
+        else:
+            print("Variables: cache hit but files incomplete, re-downloading.")
 
     if use_cache and _variables_complete(out_dir, cfg):
         print("Variables: all outputs already present in run folder, skipping.")
@@ -1332,13 +1633,16 @@ def download_variables(ctx: RunContext, use_cache: bool = True) -> dict:
     else:
         print("Variables: road.gpkg already present, skipping roads.")
 
-    # Rivers — skip if user-supplied or already present
-    if getattr(cfg, "river_path", None):
-        print("Variables: user-supplied river configured, skipping OSM river.")
-    elif not (out_dir / "river.gpkg").exists():
-        result.update(get_rivers(**osm_kwargs))
-    else:
+    # Rivers — source-dependent: user file (ingested separately), BIG RBI, or OSM
+    if cfg.river_source == "user":
+        print("Variables: river.source=user — river ingested from user_inputs, "
+              "skipping download.")
+    elif (out_dir / "river.gpkg").exists():
         print("Variables: river.gpkg already present, skipping rivers.")
+    elif cfg.river_source == "big":
+        result.update(get_rivers_big(**osm_kwargs))
+    else:  # "osm"
+        result.update(get_rivers(**osm_kwargs))
 
     # Towns / GHSL
     if cfg.use_ghsl_towns:

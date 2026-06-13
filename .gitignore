@@ -11,14 +11,14 @@ __pycache__/
 *.pyc
 
 # datasets (pipeline data now lives under active/data/)
-active/data/*.gpkg
-active/data/*.tif
-active/data/*.tiff
-active/data/*.shp
-active/data/*.shx
-active/data/*.dbf
-active/data/*.prj
-active/data/*.geojson
-active/data/*.csv
-active/data/*.parquet
-active/data/*.nc
+active/data/**/*.gpkg
+active/data/**/*.tif
+active/data/**/*.tiff
+active/data/**/*.shp
+active/data/**/*.shx
+active/data/**/*.dbf
+active/data/**/*.prj
+active/data/**/*.geojson
+active/data/**/*.csv
+active/data/**/*.parquet
+active/data/**/*.nc

@@ -50,7 +50,8 @@ user_inputs:
     industrial_value: 1                     # pixel value for industrial plantation class
     smallholder_value: 2                    # pixel value for smallholder plantation class
   river:
-    path: null   # path to river/waterway lines (GeoPackage or shapefile); null = use OSM
+    source: big   # "big" (BIG RBI REST, default) | "osm" (OpenStreetMap) | "user" (local file)
+    path: null    # required only when source: user; GeoPackage or shapefile of river lines
 
 # ── Mill data ─────────────────────────────────────────────────────────────────
 mill:

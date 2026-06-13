@@ -102,6 +102,7 @@
           "type": "object",
           "additionalProperties": false,
           "properties": {
+            "source": {"type": "string", "enum": ["big", "osm", "user"]},
             "path": {"type": ["string", "null"]}
           }
         }

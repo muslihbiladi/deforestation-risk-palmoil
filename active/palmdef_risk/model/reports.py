@@ -115,6 +115,9 @@ def export_fcc_map(ctx: "RunContext") -> Optional[Path]:
         logger.warning("fcc123.tif not found — skipping fcc map")
         return None
     out = ctx.output_dir / "diagnostics" / "fcc_history.png"
+    if out.exists():
+        logger.info("fcc_history.png exists — skipping")
+        return out
     out.parent.mkdir(parents=True, exist_ok=True)
     # Colors: class 1 (first defor period) = red, class 2 (second) = orange,
     # class 3 (forest at t3) = green — matches the project's legend style.
@@ -131,6 +134,10 @@ def export_fcc_map(ctx: "RunContext") -> Optional[Path]:
 
 def export_summary_table(ctx: "RunContext", variant: str) -> Optional[Path]:
     """Write summary_icar.txt with posterior mean/std/CI per parameter."""
+    out = ctx.output_dir / "diagnostics" / variant / "summary_icar.txt"
+    if out.exists():
+        logger.info("summary_icar.txt [%s] exists — skipping", variant)
+        return out
     state = _load_state(ctx, variant)
     if state is None:
         return None
@@ -170,6 +177,12 @@ def export_summary_table(ctx: "RunContext", variant: str) -> Optional[Path]:
 
 def export_accuracy(ctx: "RunContext", variant: str) -> Optional[tuple[Path, Path]]:
     """Write ROC+calibration plot and accuracy_summary.txt (AUC + report + CM)."""
+    out_dir = ctx.output_dir / "diagnostics" / variant
+    plot_path = out_dir / "roc_calibration.png"
+    txt_path = out_dir / "accuracy_summary.txt"
+    if plot_path.exists() and txt_path.exists():
+        logger.info("accuracy outputs [%s] exist — skipping", variant)
+        return plot_path, txt_path
     from sklearn.metrics import (
         roc_curve, auc, classification_report, confusion_matrix,
     )
@@ -181,7 +194,6 @@ def export_accuracy(ctx: "RunContext", variant: str) -> Optional[tuple[Path, Pat
         return None
     p_hat, y_obs, _ = _predict_in_sample(ctx, state, variant)
 
-    out_dir = ctx.output_dir / "diagnostics" / variant
     out_dir.mkdir(parents=True, exist_ok=True)
 
     fpr, tpr, _ = roc_curve(y_obs, p_hat)
@@ -203,7 +215,6 @@ def export_accuracy(ctx: "RunContext", variant: str) -> Optional[tuple[Path, Pat
     ax2.set_title("Calibration plot")
     ax2.legend(loc="upper left")
     fig.tight_layout()
-    plot_path = out_dir / "roc_calibration.png"
     fig.savefig(plot_path, dpi=120)
     plt.close(fig)
 
@@ -212,7 +223,6 @@ def export_accuracy(ctx: "RunContext", variant: str) -> Optional[tuple[Path, Pat
         y_obs, y_pred, target_names=["Forest", "Deforested"], digits=4
     )
     cm = confusion_matrix(y_obs, y_pred)
-    txt_path = out_dir / "accuracy_summary.txt"
     txt_path.write_text(f"AUC: {auc_val:.3f}\n\n{report}\nConfusion matrix:\n{cm}\n")
     return plot_path, txt_path
 
@@ -221,6 +231,13 @@ def export_mcmc_diagnostics(
     ctx: "RunContext", variant: str
 ) -> Optional[tuple[Path, Path, Path]]:
     """Write trace plots, autocorrelation plots, and ESS table for the MCMC chain."""
+    out_dir = ctx.output_dir / "diagnostics" / variant
+    traces_path = out_dir / "mcmc_traces.png"
+    autocorr_path = out_dir / "mcmc_autocorr.png"
+    ess_path = out_dir / "mcmc_ess.txt"
+    if traces_path.exists() and autocorr_path.exists() and ess_path.exists():
+        logger.info("mcmc diagnostics [%s] exist — skipping", variant)
+        return traces_path, autocorr_path, ess_path
     import matplotlib.pyplot as plt
 
     state = _load_state(ctx, variant)
@@ -238,7 +255,6 @@ def export_mcmc_diagnostics(
         param_names = beta_names[: mcmc.shape[1]]
         cols = list(range(len(param_names)))
 
-    out_dir = ctx.output_dir / "diagnostics" / variant
     out_dir.mkdir(parents=True, exist_ok=True)
 
     ncols = 3
@@ -256,7 +272,6 @@ def export_mcmc_diagnostics(
         ax.axis("off")
     fig.suptitle(f"Trace Plots — iCAR MCMC chain ({variant})")
     fig.tight_layout()
-    traces_path = out_dir / "mcmc_traces.png"
     fig.savefig(traces_path, dpi=120)
     plt.close(fig)
 
@@ -276,7 +291,6 @@ def export_mcmc_diagnostics(
         ax.axis("off")
     fig.suptitle(f"Autocorrelation Plots — iCAR MCMC chain ({variant})")
     fig.tight_layout()
-    autocorr_path = out_dir / "mcmc_autocorr.png"
     fig.savefig(autocorr_path, dpi=120)
     plt.close(fig)
 
@@ -291,7 +305,6 @@ def export_mcmc_diagnostics(
     for name, col in zip(param_names, cols):
         ess = _effective_sample_size(mcmc[:, col])
         lines.append(f"  {name:<{width}} {ess:>10.1f} {ess / total * 100:>13.1f}%")
-    ess_path = out_dir / "mcmc_ess.txt"
     ess_path.write_text("\n".join(lines) + "\n")
 
     return traces_path, autocorr_path, ess_path
@@ -305,6 +318,9 @@ def export_risk_map(ctx: "RunContext", variant: str) -> Optional[Path]:
         logger.warning("risk_%s.tif not found — skipping risk map", variant)
         return None
     out = ctx.output_dir / "diagnostics" / variant / "risk_map.png"
+    if out.exists():
+        logger.info("risk_map.png [%s] exists — skipping", variant)
+        return out
     out.parent.mkdir(parents=True, exist_ok=True)
     far.plot.prob(input_prob_raster=str(risk), output_file=str(out), legend=True)
     return out
@@ -326,12 +342,18 @@ def export_rho_maps(
 
     p1: Optional[Path] = None
     p2: Optional[Path] = None
-    if rho_smooth.exists():
+    if out_smooth.exists():
+        logger.info("rho_interpolated.png [%s] exists — skipping", variant)
+        p1 = out_smooth
+    elif rho_smooth.exists():
         far.plot.rho(input_rho_raster=str(rho_smooth), output_file=str(out_smooth))
         p1 = out_smooth
     else:
         logger.warning("rho.tif not found for variant %s — run prediction first", variant)
-    if rho_raw.exists():
+    if out_raw.exists():
+        logger.info("rho_raw.png [%s] exists — skipping", variant)
+        p2 = out_raw
+    elif rho_raw.exists():
         far.plot.rho(input_rho_raster=str(rho_raw), output_file=str(out_raw))
         p2 = out_raw
     else:
@@ -350,6 +372,11 @@ def export_risk_histogram(ctx: "RunContext", variant: str) -> Optional[Path]:
     risk = ctx.output_dir / "predictions" / f"risk_{variant}.tif"
     if not risk.exists():
         return None
+    out = ctx.output_dir / "diagnostics" / variant / "freq_prob.png"
+    if out.exists():
+        logger.info("freq_prob.png [%s] exists — skipping", variant)
+        return out
+    out.parent.mkdir(parents=True, exist_ok=True)
     ds = gdal.Open(str(risk))
     band = ds.GetRasterBand(1)
     arr = band.ReadAsArray()
@@ -374,8 +401,6 @@ def export_risk_histogram(ctx: "RunContext", variant: str) -> Optional[Path]:
     for t in thresholds:
         ax.axvline(t * 65535, ls="--", color="black")
 
-    out = ctx.output_dir / "diagnostics" / variant / "freq_prob.png"
-    out.parent.mkdir(parents=True, exist_ok=True)
     fig.tight_layout()
     fig.savefig(out, dpi=120)
     plt.close(fig)

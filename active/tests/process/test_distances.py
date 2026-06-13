@@ -17,10 +17,13 @@ def _make_ctx(tmp_path, write_raster, write_vector, minimal_config_yaml):
     write_raster(d / "fcc12.tif", arr, gt, 32750, nodata=255)
     write_raster(d / "forest_t3.tif", arr, gt, 32750, nodata=255)
     write_raster(d / "fcc23.tif", arr, gt, 32750, nodata=255)
-    write_vector(d / "road.gpkg", epsg=32750)
-    write_vector(d / "river.gpkg", epsg=32750)
-    write_vector(d / "town.gpkg", epsg=32750)
     write_raster(d / "plantation.tif", arr, gt, 32750, nodata=255)
+    # Vector inputs are read from raw_dir/variables (where Stage 1 downloads them)
+    vec_dir = ctx.raw_dir / "variables"
+    vec_dir.mkdir(parents=True, exist_ok=True)
+    write_vector(vec_dir / "road.gpkg", epsg=32750)
+    write_vector(vec_dir / "river.gpkg", epsg=32750)
+    write_vector(vec_dir / "town.gpkg", epsg=32750)
     return ctx
 
 

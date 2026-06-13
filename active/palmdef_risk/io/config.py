@@ -37,6 +37,7 @@ class RunConfig:
     plantation_t3: Optional[str]
     plantation_industrial_value: int
     plantation_smallholder_value: int
+    river_source: str  # "big", "osm", or "user"; "user" requires river_path
     river_path: Optional[str]
     # GEE
     gee_project: Optional[str]  # Google Earth Engine cloud project ID
@@ -104,6 +105,7 @@ class RunConfig:
             plantation_t3=str(plant["t3"]) if plant.get("t3") else None,
             plantation_industrial_value=int(plant.get("industrial_value", 1)),
             plantation_smallholder_value=int(plant.get("smallholder_value", 2)),
+            river_source=str(riv.get("source", "big")),
             river_path=str(riv["path"]) if riv.get("path") else None,
             gee_project=d.get("gee_project"),
             mill_source=str(d.get("mill", {}).get("source", "trase")),
@@ -159,6 +161,10 @@ class RunConfig:
             errors.append("mill.source must be 'trase' or 'user'")
         if self.mill_source == "user" and not self.mill_path:
             errors.append("mill.path required when mill.source: 'user'")
+        if self.river_source not in ("big", "osm", "user"):
+            errors.append("user_inputs.river.source must be 'big', 'osm', or 'user'")
+        if self.river_source == "user" and not self.river_path:
+            errors.append("user_inputs.river.path required when river.source: 'user'")
         if self.sigma_km <= 0:
             errors.append("process.gravity.sigma_km must be > 0")
         if self.radius_km <= self.sigma_km:

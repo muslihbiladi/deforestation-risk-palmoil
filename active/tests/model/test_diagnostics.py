@@ -49,7 +49,9 @@ def test_morans_i_output_has_required_keys(tmp_path):
         "A": rng.normal(0, 1, 100),
         "B": rng.normal(0, 0.5, 100),
     }
-    coords = [(i * 30, j * 30) for i in range(10) for j in range(10)]
+    # coords is per-variant (each variant may drop a different NaN subset)
+    coords_list = [(i * 30, j * 30) for i in range(10) for j in range(10)]
+    coords = {"A": coords_list, "B": coords_list}
     out = tmp_path / "moran.json"
     compute_morans_i(residuals, coords, out)
     assert out.exists()

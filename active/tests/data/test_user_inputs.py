@@ -48,3 +48,27 @@ def test_ingest_fails_undefined_crs(tmp_path, user_input_files, minimal_config_y
     ctx = create_run(bad, runs_root=tmp_path / "runs")
     with pytest.raises(ValueError, match="CRS undefined"):
         ingest_user_inputs(ctx)
+
+
+def test_river_source_user_copies_file(minimal_config_yaml, tmp_path, tiny_vector):
+    ctx = create_run(minimal_config_yaml, runs_root=tmp_path / "runs")
+    ctx.config.river_source = "user"
+    ctx.config.river_path = str(tiny_vector)
+    result = ingest_user_inputs(ctx)
+    assert result["river"] is not None
+    assert result["river"].exists()
+
+
+def test_river_source_big_skips_copy(minimal_config_yaml, tmp_path):
+    ctx = create_run(minimal_config_yaml, runs_root=tmp_path / "runs")
+    ctx.config.river_source = "big"
+    result = ingest_user_inputs(ctx)
+    assert result["river"] is None
+
+
+def test_river_source_user_without_path_raises(minimal_config_yaml, tmp_path):
+    ctx = create_run(minimal_config_yaml, runs_root=tmp_path / "runs")
+    ctx.config.river_source = "user"
+    ctx.config.river_path = None
+    with pytest.raises(ValueError, match="river.path"):
+        ingest_user_inputs(ctx)
