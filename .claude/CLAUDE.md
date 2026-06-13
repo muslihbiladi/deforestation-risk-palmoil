@@ -167,11 +167,12 @@ python -m pytest -k gravity                        # by keyword
 > conda env** before importing `palmdef_risk` or running the pipeline.
 
 > **PROJ / proj.db conflict (Windows + PostGIS).** PostgreSQL ships a stale `proj.db`
-> that shadows the conda one and makes `GetSpatialRef()` return `None`. Fixed in three
-> places that must stay in sync: `pyproject.toml [tool.pytest.ini_options].env`,
-> `active/tests/conftest.py` (top-of-file, before any osgeo import), and
-> `active/palmdef_risk/io/run.py::_fix_proj_path()`. The override MUST happen before
-> `osgeo` is imported — never move it later.
+> that shadows the conda one and makes `GetSpatialRef()` return `None`. Fixed portably in two
+> places that must stay in sync: `active/tests/conftest.py` (top-of-file, before any osgeo
+> import) and `active/palmdef_risk/io/run.py::_fix_proj_path()` — both derive the conda PROJ
+> dir from the active interpreter (`sys.executable` / `sys.prefix`), no hardcoded path. The
+> override MUST happen before `osgeo` is imported — never move it later. (`pyproject.toml`
+> previously hardcoded one user's absolute path; removed — broke non-`musli` machines / CI.)
 
 ## Architecture — the big picture
 
