@@ -180,7 +180,7 @@ process:
     sigmas_km: [15.0, 25.0, 40.0] # σ values for bandwidth sensitivity sweep
 
 model:
-  variants: [A, B, C]
+  variants: [A, B, C, D, E]
   nsamp: 10000                     # training sample size
   csize: 10                        # iCAR spatial cell size (km)
   Vbeta: 100                       # prior variance for fixed effects
@@ -231,26 +231,30 @@ runs/
     │   │   ├── mill/                      ← mill_t2.gpkg, mill_t3.gpkg
     │   │   └── user_inputs/               ← copies of peatland, HGU, plantation, river files
     │   ├── intermediate/                  ← temporary reprojected vectors (auto-cleaned)
-    │   ├── forecast/                      ← distance rasters for forecast period (t3)
+    │   ├── forecast/                      ← t3-state covariate rasters for forecast prediction
     │   │   ├── dist_edge.tif
     │   │   ├── dist_defor.tif
-    │   │   └── dist_town.tif
+    │   │   ├── dist_town.tif
+    │   │   └── plantation_resid.tif
     │   └── *.tif                          ← all aligned rasters (see Section 8)
     └── output/
         ├── sample.csv                     ← training sample (nsamp rows)
         ├── models/
         │   ├── model_A/mod_A.pkl
         │   ├── model_B/mod_B.pkl
-        │   └── model_C/mod_C.pkl
+        │   ├── model_C/mod_C.pkl
+        │   ├── model_D/mod_D.pkl
+        │   └── model_E/mod_E.pkl
         ├── diagnostics/
         │   ├── vif.json                   ← Variance Inflation Factors
         │   ├── moran.json                 ← Moran's I on deviance residuals
         │   ├── gravity_sensitivity.json   ← accessibility coefficient across σ sweep
-        │   └── A/  B/  C/                 ← per-variant diagnostic outputs (see Section 10)
+        │   └── A/  B/  C/  D/  E/        ← per-variant diagnostic outputs (see Section 10)
         └── predictions/
             ├── risk_A.tif                 ← annual deforestation probability (UInt16 scaled)
-            ├── risk_B.tif
-            ├── risk_C.tif
+            ├── risk_B.tif  risk_C.tif  risk_D.tif  risk_E.tif
+            ├── risk_A_forecast.tif        ← t3-state forecast risk (same encoding)
+            ├── risk_B_forecast.tif  risk_C_forecast.tif  risk_D_forecast.tif  risk_E_forecast.tif
             └── forest_future_*.tif        ← projected binary forest (if project_future: true)
 ```
 
@@ -289,20 +293,22 @@ All rasters in `data/` are aligned to `forest_t2.tif` (reference grid, UTM, 30 m
 
 ## 9. Model variants
 
-Three variants fit progressively richer covariate sets. All share the same iCAR spatial structure: `logit(p_i) = X_i β + ρ_cell(i)` where ρ is an intrinsic CAR spatial random effect absorbing residual spatial autocorrelation.
+Five variants fit progressively richer covariate sets. All share the same iCAR spatial structure: `logit(p_i) = X_i β + ρ_cell(i)` where ρ is an intrinsic CAR spatial random effect absorbing residual spatial autocorrelation.
 
 | Variant | Covariates | Purpose |
 |---|---|---|
-| **A** | altitude, slope, protected, log_dist_edge, log_dist_defor, log_dist_road, log_dist_river, log_dist_town | Biophysical baseline — no mill signal |
+| **A** | altitude, slope, protected, log_dist_edge, log_dist_defor, log_dist_road, log_dist_river, log_dist_town | Biophysical baseline — no mill or plantation signal |
 | **B** | A + gravity_resid | Adds mill accessibility (orthogonalised vs road + town) |
-| **C** | B + hgu_b1 + hgu_b2 | Adds HGU concession effect via natural spline (knots at −5000 m, 0 m, +5000 m) |
+| **C** | A + plantation_resid | Adds plantation proximity (orthogonalised log-residual vs dist_edge + dist_defor + dist_road) |
+| **D** | A + gravity_resid + plantation_resid | Combines mill accessibility and plantation proximity |
+| **E** | D + hgu_b1 + hgu_b2 | Adds HGU concession effect via natural spline (knots at −5000 m, 0 m, +5000 m) |
 
-**Recommended run:** `variants: [A, B, C]`
+**Recommended run:** `variants: [A, B, C, D, E]`
 
 Use DIC (Deviance Information Criterion) to compare variants — lower is better. Moran's I on deviance residuals should be near zero for all accepted variants.
 
 > **Notes**
-> - `dist_plantation_edge` is computed but **not entered into any model formula** (planned for a future variant C extension via orthogonalization — see `notes/note_3.md`).
+> - `dist_plantation_edge` is **not** entered directly into any model formula. Plantation proximity is the orthogonalized residual `plantation_resid` (variants C/D/E). Values are already in log-space — never re-log them.
 > - `dist_mill` is **not** a model covariate — mill proximity is represented by `gravity_resid` only.
 > - `Vbeta > 100` triggers a warning. Consider reducing the value if the MCMC chain shows signs of poor convergence.
 
@@ -310,7 +316,7 @@ Use DIC (Deviance Information Criterion) to compare variants — lower is better
 
 ## 10. Diagnostics reference
 
-Per-variant outputs are written to `output/diagnostics/<A|B|C>/`.
+Per-variant outputs are written to `output/diagnostics/<A|B|C|D|E>/`.
 
 | File | Description |
 |---|---|

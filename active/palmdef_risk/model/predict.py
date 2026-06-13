@@ -13,6 +13,34 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+# Static covariates reused from the t2 grid for forecast prediction (no t3 source).
+_FORECAST_STATIC_RASTERS = (
+    "altitude.tif", "slope.tif", "dist_road.tif", "dist_river.tif",
+    "protected.tif", "hgu_signed_dist.tif",
+)
+
+
+def build_forecast_vardir(ctx: "RunContext") -> Path:
+    """Assemble a clean data/forecast/ holding the full model-named covariate set.
+
+    Copies static t2 rasters in; the t3 dynamics (dist_edge, dist_defor, dist_town,
+    gravity_resid, plantation_resid) are produced upstream in Stage 2 and already
+    live under data/forecast/. Returns the forecast directory path.
+    """
+    import shutil
+    d = ctx.data_dir
+    fcast = d / "forecast"
+    fcast.mkdir(parents=True, exist_ok=True)
+    for name in _FORECAST_STATIC_RASTERS:
+        src = d / name
+        if src.exists():
+            shutil.copy2(src, fcast / name)
+        else:
+            logger.warning(
+                "Static covariate %s missing — forecast var_dir may be incomplete", name
+            )
+    return fcast
+
 
 def _create_log_dist_rasters(data_dir: Path, formula: str) -> None:
     """Write log_dist_*.tif rasters to data_dir for each log_dist_* term in formula.
@@ -233,11 +261,86 @@ def predict_risk(ctx: RunContext, model_path: Path, variant: str) -> Path:
     return risk_path
 
 
+def predict_forecast(ctx: RunContext, model_path: Path, variant: str) -> Optional[Path]:
+    """Predict t3 forecast risk for a fitted variant from data/forecast/ covariates.
+
+    Reuses the model's interpolated rho.tif (spatial effect is location-based and
+    time-agnostic). Returns risk_<variant>_forecast.tif, or None when the forecast
+    var_dir lacks a required covariate raster.
+    """
+    import forestatrisk as far
+    from patsy import dmatrices
+    from palmdef_risk.model.icar import prepare_sample
+
+    with open(model_path, "rb") as fh:
+        state = pickle.load(fh)
+
+    fcast = ctx.data_dir / "forecast"
+    rho_path = model_path.parent / "rho.tif"
+    if not rho_path.exists():
+        logger.warning(
+            "rho.tif missing for variant %s — run predict_risk before predict_forecast",
+            variant,
+        )
+        return None
+
+    # Rebuild DesignInfo from sample.csv (never pickle DesignInfo).
+    sample_path = ctx.output_dir / "sample.csv"
+    data = pd.read_csv(sample_path)
+    data = prepare_sample(data)
+    scaled_cols = re.findall(r"scale\((\w+)\)", state["formula"])
+    if scaled_cols:
+        data = data.dropna(subset=scaled_cols)
+    y, x = dmatrices(state["formula"], data, return_type="matrix")
+
+    pred_mod = far.icarModelPred(
+        formula=state["formula"],
+        _y_design_info=y.design_info,
+        _x_design_info=x.design_info,
+        betas=state["betas"],
+        rho=state["rho"],
+    )
+
+    # Build derived rasters INTO the forecast dir (from t3 dist_* + copied statics).
+    _create_log_dist_rasters(fcast, state["formula"])
+    _create_hgu_spline_rasters(fcast, state["formula"], sample_path)
+
+    # Guard: every scaled covariate + protected must exist in the forecast var_dir.
+    bare_covs = {"protected"}
+    needed = {v for v in set(scaled_cols) | bare_covs if v != "cell"}
+    missing = [v for v in needed if not (fcast / f"{v}.tif").exists()]
+    if missing:
+        logger.warning(
+            "Forecast prediction for variant %s skipped — missing forecast rasters %s",
+            variant, sorted(missing),
+        )
+        return None
+
+    out_dir = ctx.output_dir / "predictions"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    risk_path = out_dir / f"risk_{variant}_forecast.tif"
+    forest_t3 = ctx.data_dir / "forest_t3.tif"
+    if not forest_t3.exists():
+        logger.warning("forest_t3.tif missing — cannot predict forecast for %s", variant)
+        return None
+
+    far.predict_raster_binomial_iCAR(
+        pred_mod,
+        var_dir=str(fcast),
+        input_cell_raster=str(rho_path),
+        input_forest_raster=str(forest_t3),
+        output_file=str(risk_path),
+    )
+    logger.info("Forecast risk raster written: %s", risk_path)
+    return risk_path
+
+
 def predict_all(ctx: RunContext) -> list[Path]:
     """Predict risk for all fitted model variants."""
     from tqdm.auto import tqdm
     results = []
     variants = list(ctx.config.model_variants)
+    build_forecast_vardir(ctx)
     for variant in tqdm(variants, desc="Predicting risk", unit="variant"):
         model_path = ctx.output_dir / "models" / f"model_{variant}" / f"mod_{variant}.pkl"
         if not model_path.exists():
@@ -247,14 +350,14 @@ def predict_all(ctx: RunContext) -> list[Path]:
         if risk_path.exists():
             logger.info("risk_%s.tif exists — skipping prediction", variant)
             results.append(risk_path)
-            continue
-        try:
-            risk_path = predict_risk(ctx, model_path, variant)
-            results.append(risk_path)
-        except Exception:
-            import traceback
-            logger.error("Prediction failed for variant %s:\n%s", variant, traceback.format_exc())
-            continue
+        else:
+            try:
+                risk_path = predict_risk(ctx, model_path, variant)
+                results.append(risk_path)
+            except Exception:
+                import traceback
+                logger.error("Prediction failed for variant %s:\n%s", variant, traceback.format_exc())
+                continue
         try:
             future_path = project_future(ctx, risk_path, variant)
             if future_path is not None:
@@ -262,6 +365,19 @@ def predict_all(ctx: RunContext) -> list[Path]:
         except Exception:
             import traceback
             logger.error("Future projection failed for variant %s:\n%s", variant, traceback.format_exc())
+        # t3 forecast risk (decision deferred: does NOT yet feed project_future)
+        fc_path = ctx.output_dir / "predictions" / f"risk_{variant}_forecast.tif"
+        if fc_path.exists():
+            logger.info("risk_%s_forecast.tif exists — skipping forecast", variant)
+            results.append(fc_path)
+        else:
+            try:
+                fc = predict_forecast(ctx, model_path, variant)
+                if fc is not None:
+                    results.append(fc)
+            except Exception:
+                import traceback
+                logger.error("Forecast prediction failed for variant %s:\n%s", variant, traceback.format_exc())
     return results
 
 

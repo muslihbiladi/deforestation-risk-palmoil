@@ -29,17 +29,14 @@ def _predict_in_sample(
 ) -> tuple[np.ndarray, np.ndarray, list[str]]:
     """Return (p_hat, y_obs, beta_names) for variant's training subset."""
     from patsy import dmatrices
-    from palmdef_risk.model.icar import prepare_sample, _LOG_DIST_COLS
+    from palmdef_risk.model.icar import prepare_sample, _LOG_DIST_COLS, variant_extra_cols
 
     data = pd.read_csv(ctx.output_dir / "sample.csv")
     data = prepare_sample(data)
     base_cols = ["fcc23", "altitude", "slope", "protected", "cell"] + [
         f"log_{c}" for c in _LOG_DIST_COLS
     ]
-    extra_cols = (
-        (["gravity_resid"] if variant in ("B", "C") else [])
-        + (["hgu_b1", "hgu_b2"] if variant == "C" else [])
-    )
+    extra_cols = variant_extra_cols(variant)
     data = data.dropna(subset=base_cols + extra_cols)
 
     y, x = dmatrices(state["formula"], data, return_type="matrix")

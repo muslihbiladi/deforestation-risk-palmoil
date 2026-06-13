@@ -14,16 +14,39 @@ logger = logging.getLogger(__name__)
 
 _LOG_DIST_COLS = ["dist_defor", "dist_edge", "dist_road", "dist_town", "dist_river"]
 
-# Scaled covariates for each model variant (order determines column order in X)
+_BASE_SCALED_COLS = ["altitude", "slope"] + [f"log_{c}" for c in _LOG_DIST_COLS]
+
+# Covariates each variant adds beyond the biophysical base. Single source of truth
+# for both the formula RHS and the NaN-drop subset used in fit/residuals/predict.
+_VARIANT_EXTRA_COLS: dict[str, list[str]] = {
+    "A": [],
+    "B": ["gravity_resid"],
+    "C": ["plantation_resid"],
+    "D": ["gravity_resid", "plantation_resid"],
+    "E": ["gravity_resid", "plantation_resid", "hgu_b1", "hgu_b2"],
+}
+
+# Full scaled-covariate list per variant (order determines column order in X).
 _VARIANT_SCALED_COLS: dict[str, list[str]] = {
-    "A": ["altitude", "slope"] + [f"log_{c}" for c in _LOG_DIST_COLS],
-    "B": ["altitude", "slope"] + [f"log_{c}" for c in _LOG_DIST_COLS] + ["gravity_resid"],
-    "C": ["altitude", "slope"] + [f"log_{c}" for c in _LOG_DIST_COLS] + ["gravity_resid", "hgu_b1", "hgu_b2"],
+    v: _BASE_SCALED_COLS + extra for v, extra in _VARIANT_EXTRA_COLS.items()
 }
 
 
+def variant_extra_cols(variant: str) -> list[str]:
+    """Covariates a variant adds beyond the biophysical base.
+
+    Single source of truth for the NaN-drop subset consumed by _build_and_fit,
+    diagnostics.compute_residuals_all, and reports._predict_in_sample.
+    """
+    if variant not in _VARIANT_EXTRA_COLS:
+        raise ValueError(
+            f"Unknown variant: {variant!r}. Valid variants: A, B, C, D, E"
+        )
+    return list(_VARIANT_EXTRA_COLS[variant])
+
+
 def build_formula(variant: str, data: pd.DataFrame) -> str:
-    """Build the forestatrisk formula for variant A, B, or C.
+    """Build the forestatrisk formula for variant A, B, C, D, or E.
 
     Constant columns (min == max) are excluded automatically: patsy's scale()
     divides by std, which for a near-zero std produces extreme / NaN values that
@@ -31,7 +54,7 @@ def build_formula(variant: str, data: pd.DataFrame) -> str:
     """
     all_scaled = _VARIANT_SCALED_COLS.get(variant)
     if all_scaled is None:
-        raise ValueError(f"Unknown variant: {variant!r}. Valid variants: A, B, C")
+        raise ValueError(f"Unknown variant: {variant!r}. Valid variants: A, B, C, D, E")
 
     excluded, active = [], []
     for col in all_scaled:
@@ -100,10 +123,7 @@ def _build_and_fit(
     base_cols = ["fcc23", "altitude", "slope", "protected", "cell"] + [
         f"log_{c}" for c in _LOG_DIST_COLS
     ]
-    extra_cols = (
-        (["gravity_resid"] if variant in ("B", "C") else [])
-        + (["hgu_b1", "hgu_b2"] if variant == "C" else [])
-    )
+    extra_cols = variant_extra_cols(variant)
     n_before = len(data)
     data = data.dropna(subset=base_cols + extra_cols)
     if (n_dropped := n_before - len(data)):

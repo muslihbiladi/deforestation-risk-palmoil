@@ -154,3 +154,71 @@ def test_risk_raster_is_uint16_nodata_zero(tmp_path, write_raster):
     result = band.ReadAsArray()
     assert result[result > 0].min() >= 1
     ds = None
+
+
+def test_build_forecast_vardir_copies_statics(tmp_path, write_raster,
+                                              minimal_config_yaml):
+    import numpy as np
+    from osgeo import gdal
+    from palmdef_risk.io.run import create_run
+    from palmdef_risk.model.predict import build_forecast_vardir
+
+    ctx = create_run(minimal_config_yaml, runs_root=tmp_path / "runs")
+    d = ctx.data_dir
+    d.mkdir(parents=True, exist_ok=True)
+    gt = [500000, 30, 0, 9000300, 0, -30]
+    arr = np.ones((10, 10), dtype=np.float32)
+    for name in ["altitude.tif", "slope.tif", "dist_road.tif", "dist_river.tif",
+                 "protected.tif", "hgu_signed_dist.tif"]:
+        write_raster(d / name, arr, gt, 32750, dtype=gdal.GDT_Float32, nodata=-9999.0)
+
+    fcast = build_forecast_vardir(ctx)
+    for name in ["altitude.tif", "slope.tif", "dist_road.tif", "dist_river.tif",
+                 "protected.tif", "hgu_signed_dist.tif"]:
+        assert (fcast / name).exists(), f"static not copied: {name}"
+
+
+def test_predict_forecast_skips_when_covariates_missing(tmp_path, write_raster,
+                                                        minimal_config_yaml):
+    import pickle
+    import numpy as np
+    import pandas as pd
+    from osgeo import gdal
+    from palmdef_risk.io.run import create_run
+    from palmdef_risk.model.predict import predict_forecast
+
+    ctx = create_run(minimal_config_yaml, runs_root=tmp_path / "runs")
+    # Minimal sample.csv with every column prepare_sample + the test formula need.
+    ctx.output_dir.mkdir(parents=True, exist_ok=True)
+    rng = np.random.default_rng(0)
+    n = 20
+    pd.DataFrame({
+        "fcc23": rng.integers(0, 2, n),
+        "altitude": rng.uniform(0, 100, n),
+        "slope": rng.uniform(0, 30, n),
+        "protected": rng.integers(0, 2, n),
+        "cell": rng.integers(0, 4, n),
+        "dist_defor": rng.uniform(1, 5000, n),
+        "dist_edge": rng.uniform(1, 5000, n),
+        "dist_road": rng.uniform(1, 5000, n),
+        "dist_town": rng.uniform(1, 5000, n),
+        "dist_river": rng.uniform(1, 5000, n),
+        "X": rng.uniform(500000, 501000, n),
+        "Y": rng.uniform(9000000, 9001000, n),
+    }).to_csv(ctx.output_dir / "sample.csv", index=False)
+    model_dir = ctx.output_dir / "models" / "model_A"
+    model_dir.mkdir(parents=True, exist_ok=True)
+    state = {
+        "betas": np.zeros(1), "rho": np.zeros(4),
+        "formula": "I(1 - fcc23) + trial ~ scale(altitude) + protected + cell",
+        "variant": "A",
+    }
+    with open(model_dir / "mod_A.pkl", "wb") as f:
+        pickle.dump(state, f)
+    write_raster(model_dir / "rho.tif", np.ones((4, 4), dtype=np.float32),
+                 [500000, 30, 0, 9000120, 0, -30], 32750,
+                 dtype=gdal.GDT_Float32, nodata=-9999.0)
+    (ctx.data_dir / "forecast").mkdir(parents=True, exist_ok=True)
+    # forecast var_dir lacks altitude.tif/protected.tif → guard returns None
+    result = predict_forecast(ctx, model_dir / "mod_A.pkl", "A")
+    assert result is None
