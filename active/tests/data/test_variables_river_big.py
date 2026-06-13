@@ -97,9 +97,11 @@ from palmdef_risk.io.run import create_run
 
 class _Cfg:
     """Duck-typed config for _variables_complete river logic."""
-    def __init__(self, river_source, use_ghsl_towns=False):
+    def __init__(self, river_source, use_ghsl_towns=False,
+                 plantation_source="user"):
         self.river_source = river_source
         self.use_ghsl_towns = use_ghsl_towns
+        self.plantation_source = plantation_source
 
 
 def test_variables_complete_river_required_for_big(tmp_path):

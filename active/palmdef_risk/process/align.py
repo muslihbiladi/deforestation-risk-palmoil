@@ -85,11 +85,16 @@ def _discover_inputs(ctx: RunContext) -> dict:
             if p.exists():
                 d[name] = p
                 break
+    # plantation may come from user_inputs/ (source=user) or variables/ (source=download)
+    variables = ctx.raw_dir / "variables"
     for name in ("plantation_t2", "plantation_t3"):
-        for ext in (".tif", ".gpkg"):
-            p = ui / f"{name}{ext}"
-            if p.exists():
-                d[name] = p
+        for base in (ui, variables):
+            for ext in (".tif", ".gpkg"):
+                p = base / f"{name}{ext}"
+                if p.exists():
+                    d[name] = p
+                    break
+            if name in d:
                 break
     mill = ctx.raw_dir / "mill" / "mill_t2.gpkg"
     if mill.exists():
@@ -234,20 +239,26 @@ def align_all(ctx: RunContext, inputs: dict | None = None, force: bool = False) 
             )
         result["hgu_signed_dist"] = out
 
-    # 6. Plantation — merge two classes → single presence raster
-    plant_t2 = inputs.get("plantation_t2")
-    if plant_t2:
-        out = ctx.data_dir / "plantation.tif"
+    # 6. Plantation — merge two classes → single presence raster.
+    #    t2 → plantation.tif (model period); t3 → plantation_t3.tif (forecast).
+    for src_key, out_name, res_key in (
+        ("plantation_t2", "plantation.tif", "plantation"),
+        ("plantation_t3", "plantation_t3.tif", "plantation_t3"),
+    ):
+        plant_src = inputs.get(src_key)
+        if not plant_src:
+            continue
+        out = ctx.data_dir / out_name
         if not _skip(out):
-            merged = ctx.data_dir / "intermediate" / "plantation_merged.tif"
-            merge_plantation(str(plant_t2), str(merged),
+            merged = ctx.data_dir / "intermediate" / f"{src_key}_merged.tif"
+            merge_plantation(str(plant_src), str(merged),
                              ctx.config.plantation_industrial_value,
                              ctx.config.plantation_smallholder_value)
             reproject_raster_to_match(str(merged), str(out), mask_props,
                                       resample_alg="near",
                                       output_dtype=gdalconst.GDT_Byte)
             apply_mask(str(out), mask_props["invalid_mask"])
-        result["plantation"] = out
+        result[res_key] = out
 
     # 7. Mill — rasterize presence raster
     mill_gpkg = inputs.get("mill")

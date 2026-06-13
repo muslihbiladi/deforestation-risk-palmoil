@@ -54,7 +54,8 @@ a failure in one does not force re-downloading the others.
 | Forest cover | `tmf` (JRC) / `gfc` (Hansen) via GEE | `data/forest.py` | `forest_t1/2/3.tif`, `fcc12.tif`, `fcc23.tif`, `fcc123.tif` |
 | Variables | SRTM, WDPA, OSM, GHSL — or `user` per layer | `data/variables.py` | `altitude/slope.tif`, `protected/road/river/town.gpkg` |
 | Mill | `trase` / `user` | `data/mill.py` | `mill_t2.gpkg`, `mill_t3.gpkg` (+ `capacity_tonnes_ffb_hour`) |
-| User inputs | local files in `data/user_inputs/` | `data/user_inputs.py` | `peatland`, `hgu`, `plantation_t2/t3` |
+| Plantation | `download` (Descals Global Oil Palm) / `user` | `data/plantation.py` (download) · `data/user_inputs.py` (user) | `plantation_t2.tif`, `plantation_t3.tif` |
+| User inputs | local files in `data/user_inputs/` | `data/user_inputs.py` | `peatland`, `hgu`, `plantation_t2/t3` (when `plantation.source: user`) |
 
 **Per-layer source override.** `protected`, `road`, `river`, `town`, and
 `mill` each have a `source` key. Setting it to `user` makes the downloader
@@ -210,8 +211,15 @@ An orthogonalized plantation-proximity covariate that isolates plantation
 boundary proximity from the generic landscape connectivity already captured
 by `dist_edge`, `dist_defor`, and `dist_road`.
 
-**Source.** User-supplied plantation boundary polygons (industrial and/or
-smallholder, merged to a single binary presence raster at align time).
+**Source.** A two-class (industrial / smallholder) plantation raster, from either
+`plantation.source: user` (user-supplied `plantation_t2/t3` rasters) or
+`plantation.source: download` (Descals *Global Oil Palm* dataset, Zenodo
+`10.5281/zenodo.13379129`). The download path caches the global dataset once in
+`cache/plantation_global/`, then per run accumulates the cumulative extent up to
+`forest.years[1]` (t2) and `forest.years[2]` (t3) — every pixel with planting year
+`1990 ≤ YoP ≤ cutoff`, classed industrial/smallholder; years > 2021 clamp to 2021 with
+a caution. Either way, `merge_plantation` collapses the two classes to a single binary
+presence raster at align time (t2 → `plantation.tif`, t3 → `plantation_t3.tif`).
 
 **Processing (`process/plantation.py`):**
 

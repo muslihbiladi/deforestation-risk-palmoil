@@ -42,10 +42,23 @@ class CacheManager:
         stored = data.get("downloaded_extent")
         return bool(stored and _covers(stored, needed_bbox))
 
+    # ── Plantation (Descals Global Oil Palm) ─────────────────
+    # Global, AOI-independent cache of the extracted Zenodo dataset (1990-2021).
+    # Shared across all runs; clipping to AOI happens at download time.
+    def plantation_global_dir(self) -> Path:
+        return self.cache_dir / "plantation_global"
+
+    def plantation_global_valid(self) -> bool:
+        d = self.plantation_global_dir()
+        return ((d / "extent.vrt").exists()
+                and (d / "yop.vrt").exists()
+                and (d / "metadata.json").exists())
+
     # ── Variables ────────────────────────────────────────────
     def variables_key(self, aoi_bbox, buffer, use_ghsl, ghsl_years, timeout,
-                      river_source="big") -> str:
-        return _hash(aoi_bbox, buffer, use_ghsl, ghsl_years, timeout, river_source)
+                      river_source="big", plantation_source="user") -> str:
+        return _hash(aoi_bbox, buffer, use_ghsl, ghsl_years, timeout,
+                     river_source, plantation_source)
 
     def variables_dir(self, key: str) -> Path:
         return self.cache_dir / "variables" / key

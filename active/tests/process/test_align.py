@@ -59,6 +59,24 @@ def _write_hgu_gpkg(path, epsg=32750):
     return path
 
 
+def test_discover_inputs_finds_plantation_in_variables(tmp_path):
+    """Downloaded plantation lands in variables/; user-supplied in user_inputs/.
+
+    Covers the t3 alignment path: _discover_inputs must surface plantation_t3
+    from variables/ (download source) so align_all can produce plantation_t3.tif.
+    """
+    from types import SimpleNamespace
+    from palmdef_risk.process.align import _discover_inputs
+    raw = tmp_path / "raw"
+    (raw / "user_inputs").mkdir(parents=True)
+    (raw / "variables").mkdir(parents=True)
+    (raw / "user_inputs" / "plantation_t2.tif").write_bytes(b"x")
+    (raw / "variables" / "plantation_t3.tif").write_bytes(b"x")
+    d = _discover_inputs(SimpleNamespace(raw_dir=raw))
+    assert d["plantation_t2"] == raw / "user_inputs" / "plantation_t2.tif"
+    assert d["plantation_t3"] == raw / "variables" / "plantation_t3.tif"
+
+
 def test_protected_filename_constant():
     from palmdef_risk.process.align import _PROTECTED_FILENAME
     assert _PROTECTED_FILENAME == "protected"

@@ -92,6 +92,7 @@
           "type": "object",
           "additionalProperties": false,
           "properties": {
+            "source": {"type": "string", "enum": ["download", "user"]},
             "t2": {"type": ["string", "null"]},
             "t3": {"type": ["string", "null"]},
             "industrial_value": {"type": "integer"},

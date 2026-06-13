@@ -27,17 +27,23 @@ def ingest_user_inputs(ctx: RunContext) -> dict[str, Path | None]:
     result["peatland"] = _copy_vector(cfg.peatland_path, dst, "peatland")
     result["hgu"] = _copy_vector(cfg.hgu_path, dst, "hgu")
 
-    if cfg.plantation_t2:
-        result["plantation_t2"] = _copy_raster(cfg.plantation_t2, dst, "plantation_t2")
-    else:
-        log.info("plantation.t2 not configured — dist_plantation_edge will be skipped")
+    if cfg.plantation_source == "download":
+        log.info("plantation.source=download — plantation rasters downloaded in "
+                 "Stage 1 (Descals), skipping user-input copy")
         result["plantation_t2"] = None
-
-    if cfg.plantation_t3:
-        result["plantation_t3"] = _copy_raster(cfg.plantation_t3, dst, "plantation_t3")
-    else:
-        log.info("plantation.t3 not configured — dist_plantation_edge_forecast will be skipped")
         result["plantation_t3"] = None
+    else:
+        if cfg.plantation_t2:
+            result["plantation_t2"] = _copy_raster(cfg.plantation_t2, dst, "plantation_t2")
+        else:
+            log.info("plantation.t2 not configured — dist_plantation_edge will be skipped")
+            result["plantation_t2"] = None
+
+        if cfg.plantation_t3:
+            result["plantation_t3"] = _copy_raster(cfg.plantation_t3, dst, "plantation_t3")
+        else:
+            log.info("plantation.t3 not configured — dist_plantation_edge_forecast will be skipped")
+            result["plantation_t3"] = None
 
     if cfg.river_source == "user":
         if not cfg.river_path:

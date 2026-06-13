@@ -33,6 +33,7 @@ class RunConfig:
     peatland_path: str
     peatland_type: str
     hgu_path: str
+    plantation_source: str  # "download" (Descals Global Oil Palm) or "user"
     plantation_t2: Optional[str]
     plantation_t3: Optional[str]
     plantation_industrial_value: int
@@ -101,6 +102,7 @@ class RunConfig:
             peatland_path=str(peat.get("path", "")),
             peatland_type=str(peat.get("type", "binary")),
             hgu_path=str(hgu.get("path", "")),
+            plantation_source=str(plant.get("source", "user")),
             plantation_t2=str(plant["t2"]) if plant.get("t2") else None,
             plantation_t3=str(plant["t3"]) if plant.get("t3") else None,
             plantation_industrial_value=int(plant.get("industrial_value", 1)),
@@ -165,6 +167,12 @@ class RunConfig:
             errors.append("user_inputs.river.source must be 'big', 'osm', or 'user'")
         if self.river_source == "user" and not self.river_path:
             errors.append("user_inputs.river.path required when river.source: 'user'")
+        if self.plantation_source not in ("download", "user"):
+            errors.append("user_inputs.plantation.source must be 'download' or 'user'")
+        if self.plantation_source == "download" and len(self.forest_years) < 3:
+            errors.append(
+                "plantation.source=download requires forest.years to have [t1, t2, t3]"
+            )
         if self.sigma_km <= 0:
             errors.append("process.gravity.sigma_km must be > 0")
         if self.radius_km <= self.sigma_km:

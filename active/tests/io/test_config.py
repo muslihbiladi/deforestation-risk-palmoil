@@ -112,6 +112,40 @@ def test_validate_rejects_unknown_variant(minimal_config_yaml):
     assert any("unknown variant" in e.lower() for e in cfg.validate())
 
 
+def test_plantation_source_defaults_to_user(minimal_config_yaml):
+    cfg = RunConfig.from_yaml(minimal_config_yaml)
+    assert cfg.plantation_source == "user"
+
+
+def test_plantation_source_download_parses(minimal_config_yaml, tmp_path):
+    d = yaml.safe_load(minimal_config_yaml.read_text())
+    d["user_inputs"]["plantation"]["source"] = "download"
+    p = tmp_path / "dl.yaml"
+    p.write_text(yaml.dump(d))
+    cfg = RunConfig.from_yaml(p)
+    assert cfg.plantation_source == "download"
+    assert cfg.validate() == []  # forest.years has t1,t2,t3
+
+
+def test_plantation_source_download_requires_three_forest_years(minimal_config_yaml, tmp_path):
+    d = yaml.safe_load(minimal_config_yaml.read_text())
+    d["user_inputs"]["plantation"]["source"] = "download"
+    d["forest"]["years"] = [2015, 2020]  # only t1, t2
+    p = tmp_path / "dl2.yaml"
+    p.write_text(yaml.dump(d))
+    errors = RunConfig.from_yaml(p).validate()
+    assert any("plantation.source=download" in e for e in errors)
+
+
+def test_plantation_source_invalid_value_rejected(minimal_config_yaml, tmp_path):
+    d = yaml.safe_load(minimal_config_yaml.read_text())
+    d["user_inputs"]["plantation"]["source"] = "satellite"
+    p = tmp_path / "bad_src.yaml"
+    p.write_text(yaml.dump(d))
+    errors = RunConfig.from_yaml(p).validate()
+    assert any("plantation.source" in e for e in errors)
+
+
 def _base_cfg(uif):
     return {
         "run": {"project": "test_proj", "area": "test_area", "task": "test"},

@@ -112,9 +112,16 @@ You need either:
 
 | File | Format | Description |
 |---|---|---|
-| `plantation_t2.tif` | Raster | Plantation cover at reference year t2. Pixel values: `industrial_value` and `smallholder_value` (set in config). |
-| `plantation_t3.tif` | Raster | Plantation cover at forecast year t3. Optional. |
+| `plantation_t2.tif` | Raster | Plantation cover at reference year t2. Pixel values: `industrial_value` and `smallholder_value` (set in config). Needed only when `plantation.source: user`. |
+| `plantation_t3.tif` | Raster | Plantation cover at forecast year t3. Optional; needed only when `plantation.source: user`. |
 | `river.gpkg` / `.shp` | Vector lines | Custom river / waterway network. If omitted, OSM waterways are downloaded automatically. |
+
+> **Plantation can be downloaded instead of supplied.** Set `plantation.source: download`
+> to pull the [Descals *Global oil palm extent and planting year 1990–2021*](https://zenodo.org/records/13379129)
+> dataset. The pipeline downloads it once into a shared cache (`cache/plantation_global/`),
+> then for each run accumulates the cumulative plantation extent up to `forest.years[1]`
+> (t2) and `forest.years[2]` (t3) — every pixel planted from 1990 through the cutoff year,
+> classed industrial/smallholder. Years beyond 2021 are clamped to 2021 with a caution.
 
 ### 4.4 Google Earth Engine project
 
@@ -161,8 +168,9 @@ user_inputs:
   hgu:
     path: data/user_inputs/hgu.gpkg
   plantation:
-    t2: null                       # path to plantation raster at t2, or null
-    t3: null
+    source: user                   # "download" (Descals Global Oil Palm) or "user"
+    t2: null                       # path to plantation raster at t2, or null (source: user only)
+    t3: null                       # path to plantation raster at t3, or null (source: user only)
     industrial_value: 1
     smallholder_value: 2
   river:

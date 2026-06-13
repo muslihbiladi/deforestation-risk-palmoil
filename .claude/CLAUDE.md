@@ -81,9 +81,28 @@ NEVER use `pa` or `pa_status` — causes patsy formula parsing errors in iCAR fi
 - Filter: `earliest_year_of_existence <= t_year OR null` (conservative — nulls included)
 - Cache stores AOI-unfiltered (Indonesia-wide) data; AOI clipping at runtime.
 
+## Plantation data rules
+- Two sources via `user_inputs.plantation.source`: `user` (default — supply
+  `plantation.t2`/`t3` rasters) or `download` (Descals Global Oil Palm, Zenodo
+  `10.5281/zenodo.13379129`).
+- `download` writes `plantation_t2.tif` / `plantation_t3.tif` into the run's
+  `variables/` folder (same as GHSL); `user` files live in `user_inputs/`. align
+  discovers plantation from both.
+- Descals classes match config: `[1]=industrial`, `[2]=smallholder`.
+- **Accumulation**: plantation at year Y = all pixels with `1990 ≤ YoP ≤ Y` (cumulative
+  extent), class taken from the OP-extent layer. Year cutoffs come from `forest.years`
+  (t2=`years[1]`, t3=`years[2]`).
+- Dataset covers **1990–2021**; a requested year > 2021 is clamped to 2021 with a
+  caution notice.
+- `download` requires `forest.years` to have all three entries `[t1, t2, t3]`.
+
 ## Cache validity rules
 - Mill: existence check only (keyed by `{t2_year}_{t3_year}`)
 - Forest / Variables: spatial coverage check — `cached_extent ⊇ new_aoi + buffer`
+  (variables key now includes `plantation_source` so download/user don't collide)
+- Plantation (Descals): global, AOI-independent cache at `cache/plantation_global/`
+  (`extent.vrt` + `yop.vrt` + `metadata.json`). Existence check only; downloaded once,
+  reused across all runs. Availability checked at Stage 1 only when `source=download`.
 
 ## Gravity implementation
 - `A_i = Σ_m exp(-d²(i,m)/2σ²)` as `scipy.ndimage.gaussian_filter` on mill density raster.

@@ -1549,6 +1549,9 @@ def _variables_complete(out_dir, cfg) -> bool:
         required += [out_dir / "ghsl_built_t2.tif", out_dir / "ghsl_built_t3.tif"]
     else:
         required.append(out_dir / "town.gpkg")
+    # plantation: downloaded into variables/ only when source=download
+    if cfg.plantation_source == "download":
+        required += [out_dir / "plantation_t2.tif", out_dir / "plantation_t3.tif"]
     return all(p.exists() for p in required)
 
 
@@ -1570,7 +1573,8 @@ def download_variables(ctx: RunContext, use_cache: bool = True) -> dict:
     _bbox = aoi_bbox_4326(cfg.aoi_source)
     _cm = CacheManager(cfg.cache_dir)
     _vkey = _cm.variables_key(_bbox, cfg.aoi_buffer, cfg.use_ghsl_towns,
-                              cfg.ghsl_years, cfg.osm_timeout, cfg.river_source)
+                              cfg.ghsl_years, cfg.osm_timeout, cfg.river_source,
+                              cfg.plantation_source)
 
     if use_cache and _cm.variables_valid(_vkey, list(_bbox)):
         _cache_d = _cm.variables_dir(_vkey)
@@ -1643,6 +1647,24 @@ def download_variables(ctx: RunContext, use_cache: bool = True) -> dict:
         result.update(get_rivers_big(**osm_kwargs))
     else:  # "osm"
         result.update(get_rivers(**osm_kwargs))
+
+    # Plantation — only when source=download (user source is ingested separately)
+    if cfg.plantation_source == "download":
+        if (out_dir / "plantation_t2.tif").exists() and (out_dir / "plantation_t3.tif").exists():
+            print("Variables: plantation_t2/t3.tif already present, skipping plantation.")
+        else:
+            from palmdef_risk.data.plantation import get_plantation_descals
+            result.update(get_plantation_descals(
+                aoi=cfg.aoi_source,
+                years=[cfg.forest_years[1], cfg.forest_years[2]],
+                cache_dir=cfg.cache_dir,
+                output_dir=str(out_dir),
+                buff=buff_deg,
+                output_crs=cfg.crs,
+                industrial_value=cfg.plantation_industrial_value,
+                smallholder_value=cfg.plantation_smallholder_value,
+                verbose=True,
+            ))
 
     # Towns / GHSL
     if cfg.use_ghsl_towns:

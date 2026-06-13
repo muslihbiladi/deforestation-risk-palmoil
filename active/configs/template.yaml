@@ -45,10 +45,11 @@ user_inputs:
   hgu:
     path: data/user_inputs/hgu.gpkg        # HGU (hydrological geomorphic unit) polygons
   plantation:
-    t2: data/user_inputs/plantation_t2.tif  # plantation raster at t2 date (reference year)
-    t3: null                                # plantation raster at t3 date (optional)
-    industrial_value: 1                     # pixel value for industrial plantation class
-    smallholder_value: 2                    # pixel value for smallholder plantation class
+    source: user  # "download" (Descals Global Oil Palm 1990-2021, accumulated to forest.years) | "user" (rasters below)
+    t2: data/user_inputs/plantation_t2.tif  # plantation raster at t2 date (used only when source: user)
+    t3: null                                # plantation raster at t3 date (used only when source: user)
+    industrial_value: 1                     # industrial plantation class value (matches Descals class 1)
+    smallholder_value: 2                    # smallholder plantation class value (matches Descals class 2)
   river:
     source: big   # "big" (BIG RBI REST, default) | "osm" (OpenStreetMap) | "user" (local file)
     path: null    # required only when source: user; GeoPackage or shapefile of river lines
