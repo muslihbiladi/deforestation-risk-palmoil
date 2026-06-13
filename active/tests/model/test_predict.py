@@ -182,12 +182,30 @@ def test_predict_forecast_skips_when_covariates_missing(tmp_path, write_raster,
                                                         minimal_config_yaml):
     import pickle
     import numpy as np
+    import pandas as pd
     from osgeo import gdal
     from palmdef_risk.io.run import create_run
     from palmdef_risk.model.predict import predict_forecast
 
     ctx = create_run(minimal_config_yaml, runs_root=tmp_path / "runs")
-    _make_sample_csv(ctx.output_dir)
+    # Minimal sample.csv with every column prepare_sample + the test formula need.
+    ctx.output_dir.mkdir(parents=True, exist_ok=True)
+    rng = np.random.default_rng(0)
+    n = 20
+    pd.DataFrame({
+        "fcc23": rng.integers(0, 2, n),
+        "altitude": rng.uniform(0, 100, n),
+        "slope": rng.uniform(0, 30, n),
+        "protected": rng.integers(0, 2, n),
+        "cell": rng.integers(0, 4, n),
+        "dist_defor": rng.uniform(1, 5000, n),
+        "dist_edge": rng.uniform(1, 5000, n),
+        "dist_road": rng.uniform(1, 5000, n),
+        "dist_town": rng.uniform(1, 5000, n),
+        "dist_river": rng.uniform(1, 5000, n),
+        "X": rng.uniform(500000, 501000, n),
+        "Y": rng.uniform(9000000, 9001000, n),
+    }).to_csv(ctx.output_dir / "sample.csv", index=False)
     model_dir = ctx.output_dir / "models" / "model_A"
     model_dir.mkdir(parents=True, exist_ok=True)
     state = {
