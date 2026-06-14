@@ -9,7 +9,7 @@ import numpy as np
 import pandas as pd
 from osgeo import gdal
 
-from palmdef_risk.process.gravity import orthogonalize_gravity_ctx
+from palmdef_risk.process.gravity import orthogonalize_gravity_ctx, _apply_gaussian_filter
 from palmdef_risk.model.icar import _build_and_fit
 
 if TYPE_CHECKING:
@@ -18,15 +18,16 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
-def compute_gravity_raw(ctx: "RunContext", sigma_km: float) -> Path:
-    """Compute gravity_raw.tif at a given sigma (overwrites ctx.data_dir/gravity_raw.tif).
+def _rasterize_mills_density(ctx: "RunContext") -> Path | None:
+    """Burn mills into a sigma-invariant density bitmap once.
 
     Reprojects the mill GPKG to the reference raster's CRS before burning, so the
     rasterization step doesn't silently produce zero burns when the cached mill
-    file's CRS differs from the run's UTM grid. Matches the production path in
-    `process.gravity._compute_gravity_for_period`.
+    file's CRS differs from the run's UTM grid. Returns the density raster path,
+    or None when no mill points burn. The sigma sweep applies only the Gaussian
+    kernel to this bitmap, so it is computed once rather than per bandwidth.
     """
-    from palmdef_risk.process.gravity import _apply_gaussian_filter, _rasterize_points_numpy
+    from palmdef_risk.process.gravity import _rasterize_points_numpy
     from palmdef_risk.io.helpers import get_mask_properties, reproject_vector
     d = ctx.data_dir
     ref = d / "forest_t2.tif"
@@ -42,12 +43,26 @@ def compute_gravity_raw(ctx: "RunContext", sigma_km: float) -> Path:
         proj_mill.unlink(missing_ok=True)
 
     if n_burned == 0:
-        logger.error("No mill points burned for sigma=%.0f km", sigma_km)
+        logger.error("No mill points burned for gravity sensitivity sweep")
         tmp.unlink(missing_ok=True)
-        return d / "gravity_raw.tif"
+        return None
+    return tmp
+
+
+def compute_gravity_raw(ctx: "RunContext", sigma_km: float) -> Path:
+    """Compute gravity_raw.tif at a given sigma (overwrites ctx.data_dir/gravity_raw.tif).
+
+    Single-shot helper for callers computing one bandwidth in isolation; the
+    sigma sweep instead rasterizes once via `_rasterize_mills_density` and
+    re-applies only the Gaussian kernel per sigma.
+    """
+    d = ctx.data_dir
     out = d / "gravity_raw.tif"
-    _apply_gaussian_filter(tmp, out, sigma_km=sigma_km, radius_km=ctx.config.radius_km)
-    tmp.unlink(missing_ok=True)
+    density = _rasterize_mills_density(ctx)
+    if density is None:
+        return out
+    _apply_gaussian_filter(density, out, sigma_km=sigma_km, radius_km=ctx.config.radius_km)
+    density.unlink(missing_ok=True)
     return out
 
 
@@ -103,9 +118,17 @@ def run_gravity_sensitivity(ctx: "RunContext") -> Path:
     from tqdm.auto import tqdm
     results = []
     sigmas = list(ctx.config.sensitivity_sigmas)
+
+    # Rasterize the mill density bitmap ONCE — it is sigma-invariant. Each sigma
+    # only re-applies the Gaussian kernel to this bitmap.
+    density = _rasterize_mills_density(ctx)
+    gravity_raw = d / "gravity_raw.tif"
+
     for sigma in tqdm(sigmas, desc="Gravity sensitivity (σ sweep)", unit="σ"):
         logger.info("Gravity sensitivity: sigma=%.0f km", sigma)
-        compute_gravity_raw(ctx, sigma_km=sigma)
+        if density is not None:
+            _apply_gaussian_filter(density, gravity_raw,
+                                   sigma_km=sigma, radius_km=ctx.config.radius_km)
         # force=False: keep the gravity_raw.tif we just wrote at the sensitivity sigma.
         # _compute_gravity_for_period still re-runs orthogonalize() unconditionally.
         orthogonalize_gravity_ctx(ctx, force=False)
@@ -131,6 +154,9 @@ def run_gravity_sensitivity(ctx: "RunContext") -> Path:
                 else float(deviance)
             ),
         })
+
+    if density is not None:
+        density.unlink(missing_ok=True)
 
     if backup_raw.exists():
         shutil.move(str(backup_raw), d / "gravity_raw.tif")

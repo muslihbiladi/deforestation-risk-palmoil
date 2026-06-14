@@ -22,9 +22,6 @@ def test_sensitivity_json_has_entry_per_sigma(tmp_path, minimal_config_yaml):
     # Return a different beta per call so the test sees variation across sigmas.
     call_counter = {"n": 0}
 
-    def _fake_compute(ctx_arg, sigma_km):
-        return tmp_path / "gravity_raw.tif"
-
     def _fake_ortho(ctx_arg, force=False):
         return 0.0
 
@@ -39,11 +36,18 @@ def test_sensitivity_json_has_entry_per_sigma(tmp_path, minimal_config_yaml):
             "deviance": np.array([100.0 + call_counter["n"]]),
         }
 
-    with patch("palmdef_risk.model.sensitivity.compute_gravity_raw", _fake_compute), \
+    with patch("palmdef_risk.model.sensitivity._rasterize_mills_density",
+               return_value=tmp_path / "density.tif") as m_rast, \
+         patch("palmdef_risk.model.sensitivity._apply_gaussian_filter") as m_filter, \
          patch("palmdef_risk.model.sensitivity.orthogonalize_gravity_ctx", _fake_ortho), \
          patch("palmdef_risk.model.sensitivity._resample_gravity_resid", _fake_resample), \
          patch("palmdef_risk.model.sensitivity._build_and_fit", _fake_build_and_fit):
         out_json = run_gravity_sensitivity(ctx)
+
+    # Mill density bitmap is sigma-invariant: rasterize ONCE, vary only the
+    # Gaussian kernel per sigma.
+    assert m_rast.call_count == 1
+    assert m_filter.call_count == len(sigmas)
 
     assert out_json.exists()
     data = json.loads(out_json.read_text())
