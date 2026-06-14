@@ -105,7 +105,13 @@ NEVER use `pa` or `pa_status` — causes patsy formula parsing errors in iCAR fi
   reused across all runs. Availability checked at Stage 1 only when `source=download`.
 
 ## Gravity implementation
-- `A_i = Σ_m exp(-d²(i,m)/2σ²)` as `scipy.ndimage.gaussian_filter` on mill density raster.
+- `A_i = Σ_m exp(-d²(i,m)/2σ²)` over mills **within `radius_km`** — a Gaussian
+  kernel truncated to a circular `radius_km` catchment, convolved over the
+  mill-density raster via `scipy.signal.oaconvolve` (area-normalized; mills
+  beyond `radius_km` contribute exactly 0). `radius_km` is config-validated
+  `> sigma_km`. A full-support kernel would leak ≈14 % of its mass past 2σ
+  (e.g. σ=40 km / radius=80 km in the bandwidth sweep) — truncation prevents
+  the catchment silently growing with σ.
 - NOT a per-pixel loop.
 - `gravity_resid = A_i - OLS(A_i ~ dist_road + dist_town)` — residual is the covariate.
 
@@ -167,11 +173,12 @@ python -m pytest -k gravity                        # by keyword
 > conda env** before importing `palmdef_risk` or running the pipeline.
 
 > **PROJ / proj.db conflict (Windows + PostGIS).** PostgreSQL ships a stale `proj.db`
-> that shadows the conda one and makes `GetSpatialRef()` return `None`. Fixed in three
-> places that must stay in sync: `pyproject.toml [tool.pytest.ini_options].env`,
-> `active/tests/conftest.py` (top-of-file, before any osgeo import), and
-> `active/palmdef_risk/io/run.py::_fix_proj_path()`. The override MUST happen before
-> `osgeo` is imported — never move it later.
+> that shadows the conda one and makes `GetSpatialRef()` return `None`. Fixed portably in two
+> places that must stay in sync: `active/tests/conftest.py` (top-of-file, before any osgeo
+> import) and `active/palmdef_risk/io/run.py::_fix_proj_path()` — both derive the conda PROJ
+> dir from the active interpreter (`sys.executable` / `sys.prefix`), no hardcoded path. The
+> override MUST happen before `osgeo` is imported — never move it later. (`pyproject.toml`
+> previously hardcoded one user's absolute path; removed — broke non-`musli` machines / CI.)
 
 ## Architecture — the big picture
 

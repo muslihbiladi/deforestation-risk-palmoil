@@ -25,11 +25,8 @@ include = ["palmdef_risk*"]
 [tool.pytest.ini_options]
 # Tests live under active/tests/ after the repo reorganization.
 testpaths = ["active/tests"]
-# Belt-and-suspenders PROJ fix: pytest-env sets these before Python starts so
-# PROJ.dll loads the correct database (PostgreSQL ships a stale proj.db that
-# shadows the conda one). conftest.py also probes portably at runtime; both
-# must stay in sync. See CLAUDE.md "PROJ / proj.db conflict" note.
-env = [
-    "PROJ_LIB=C:\\Users\\musli\\.conda\\envs\\palmdef-risk\\Library\\share\\proj",
-    "PROJ_DATA=C:\\Users\\musli\\.conda\\envs\\palmdef-risk\\Library\\share\\proj",
-]
+# PROJ db conflict (PostgreSQL ships a stale proj.db that shadows the conda one)
+# is fixed portably at runtime in active/tests/conftest.py (top-of-file, before
+# any osgeo import) and palmdef_risk/io/run.py::_fix_proj_path() — both derive
+# the conda PROJ dir from the active interpreter. See CLAUDE.md "PROJ / proj.db
+# conflict" note. No hardcoded path here (broke non-musli machines / CI).

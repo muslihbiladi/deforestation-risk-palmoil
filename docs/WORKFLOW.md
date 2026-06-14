@@ -125,26 +125,27 @@ Outputs land in `ctx.data_dir` as `{name}.tif`.
 
 ### 3.2 Distance calculation logic (`compute_all_distances`)
 
-Distances are Euclidean distance transforms computed by
-`forestatrisk.data.compute.compute_distance()`. The critical parameter is
-**`values`**, which selects what the distance is measured *to*:
+Distances are Euclidean distance transforms in metres, computed by
+`gdal.ComputeProximity` (`DISTUNITS=GEO`; see `process/distances.py`). The
+critical parameter is **`target_value`**, which selects what the distance is
+measured *to*:
 
-- **`values=0`** — distance to non-feature / background pixels. Used for
+- **`target_value=0`** — distance to non-feature / background pixels. Used for
   *edge* and *deforestation* surfaces, where the meaningful gradient is the
   approach toward already-cleared land:
   `dist_edge` (from `forest_t2`), `dist_defor` (from `fcc12`), and their
-  `*_forecast` variants from t3 layers.
-- **`values=1`** — distance to the nearest **feature** pixel. Used for all
-  presence rasters: `dist_road`, `dist_river`, `dist_town`, `dist_mill`,
-  `dist_plantation_edge`, `dist_ghsl_built`. With `values=0` these would
+  forecast variants (`forecast/dist_*`, from `forest_t3` / `fcc23`).
+- **`target_value=1`** — distance to the nearest **feature** pixel. Used for the
+  presence rasters: `dist_road`, `dist_river`, `dist_town`,
+  `dist_plantation_edge`. (`dist_town` falls back to the GHSL built-up raster
+  when no OSM town vector is present.) With `target_value=0` these would
   measure distance *away from* non-features and be meaningless.
 
-A self-repair guard (`_repair_zero_variance_raster`) detects a `dist_mill.tif`
-accidentally produced with `values=0` — its non-NoData pixels have near-zero
-variance — deletes it, and recomputes with `values=1`.
+`dist_mill` is **not** computed here — mill proximity enters the model only
+through `gravity_resid` (§3.3), never as a direct distance covariate.
 
-Forecast distances (`dist_*_forecast`) repeat the same logic on t3 inputs to
-support future projection. All distances run in parallel (§6).
+Forecast distances (under `data/forecast/`) repeat the same logic on t3 inputs
+to support future projection. All distances run in parallel (§6).
 
 ### 3.3 Gravity-weighted mill accessibility (orthogonalized)
 
@@ -161,9 +162,13 @@ filtered to Indonesia (≈600–800 mills).
 A_i = Σ_m exp(-d²(i,m) / 2σ²)
 ```
 
-summed over every mill *m* within 80 km, with σ = 25 km. In Python this is
-implemented as a distance transform plus a Gaussian filter applied to a
-mill-density raster, rather than a per-pixel loop over mills.
+summed over every mill *m* within `radius_km` (default 80 km), with σ = 25 km.
+In Python this is a Gaussian kernel **truncated at `radius_km`** — a circular
+catchment; mills beyond it contribute exactly 0 — convolved over a mill-density
+raster via overlap-add FFT (`scipy.signal.oaconvolve`), rather than a per-pixel
+loop over mills. The truncation keeps the 80 km catchment fixed as σ varies in
+the bandwidth sweep (§4.5); a full-support kernel would leak ≈14 % of its mass
+beyond 80 km at σ = 40 km.
 
 **Orthogonalization.** `A_i` is partly redundant with generic infrastructure
 proximity. It is therefore regressed on the pixel sample against road and
