@@ -39,6 +39,7 @@ import os
 import io
 import math
 import time
+import logging
 import multiprocessing
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
@@ -57,6 +58,8 @@ from palmdef_risk.data._ee_utils import (
     _clip_to_vector,
 )
 from palmdef_risk.constants import NODATA_BYTE, GTIFF_OPTS
+
+logger = logging.getLogger(__name__)
 
 # Suppress GDAL warnings
 gdal.UseExceptions()
@@ -227,12 +230,12 @@ def export_bands(input_file, output_dir=None, prefix="forest_t",
 
         output_files.append(out_path)
         if verbose:
-            print(f"  Band {b} exported: {out_path}")
+            logger.info(f"  Band {b} exported: {out_path}")
 
     ds = None
 
     if verbose:
-        print(f"Exported {n_bands} bands from {input_file}")
+        logger.info(f"Exported {n_bands} bands from {input_file}")
 
     return output_files
 
@@ -326,8 +329,8 @@ def export_period_fcc(input_file, output_dir=None, verbose=True):
 
     if verbose:
         for i, out_path in enumerate(output_files):
-            print(f"  Period {i+1}→{i+2} exported: {out_path}")
-        print(f"Exported {len(output_files)} period FCC rasters")
+            logger.info(f"  Period {i+1}→{i+2} exported: {out_path}")
+        logger.info(f"Exported {len(output_files)} period FCC rasters")
 
     return output_files
 
@@ -358,7 +361,7 @@ def sum_raster_bands(input_file, output_file, verbose=True):
     proj = ds.GetProjection()
 
     if verbose:
-        print(f"Summing {n_bands} bands from {input_file}")
+        logger.info(f"Summing {n_bands} bands from {input_file}")
 
     # Read all bands and build a NoData mask
     nodata_mask = np.zeros((n_rows, n_cols), dtype=bool)
@@ -394,7 +397,7 @@ def sum_raster_bands(input_file, output_file, verbose=True):
     out_ds = None
 
     if verbose:
-        print(f"Output written to {output_file}")
+        logger.info(f"Output written to {output_file}")
 
 
 # ============================================================
@@ -455,7 +458,7 @@ def reproject_raster(input_file, output_file, dst_crs="EPSG:32750",
     gdal.Warp(output_file, input_file, options=warp_options)
 
     if verbose:
-        print(f"Reprojected: {input_file} → {output_file} [{dst_crs}]")
+        logger.info(f"Reprojected: {input_file} → {output_file} [{dst_crs}]")
 
     return output_file
 
@@ -565,7 +568,7 @@ def get_fcc(
     # ---- Parse AOI ----
     extent = _parse_aoi(aoi, buff)
     if verbose:
-        print(f"AOI extent (with buffer): {extent}")
+        logger.info(f"AOI extent (with buffer): {extent}")
 
     # ---- Validate years ----
     if source == "tmf":
@@ -587,7 +590,7 @@ def get_fcc(
 
     # ---- Build forest cover Image ----
     if verbose:
-        print(f"Building forest cover from {source.upper()} "
+        logger.info(f"Building forest cover from {source.upper()} "
               f"for years {years}")
 
     if source == "tmf":
@@ -607,11 +610,11 @@ def get_fcc(
     if tile_size is None:
         tile_size = max_tile_deg
         if verbose:
-            print(f"Auto tile size: {tile_size:.4f}° "
+            logger.info(f"Auto tile size: {tile_size:.4f}° "
                   f"({safe_side}x{safe_side} px) for {n_bands} bands")
     elif tile_size > max_tile_deg:
         if verbose:
-            print(f"WARNING: tile_size={tile_size}° too large for "
+            logger.warning(f"WARNING: tile_size={tile_size}° too large for "
                   f"{n_bands} bands. Reducing to {max_tile_deg:.4f}°")
         tile_size = max_tile_deg
 
@@ -619,7 +622,7 @@ def get_fcc(
     snapped_extent = _snap_extent(extent, SCALE)
     tiles = _make_grid(snapped_extent, tile_size, SCALE)
     if verbose:
-        print(f"Number of tiles: {len(tiles)}")
+        logger.info(f"Number of tiles: {len(tiles)}")
 
     # ---- Prepare output directory ----
     output_dir = os.path.dirname(os.path.abspath(output_file))
@@ -642,7 +645,7 @@ def get_fcc(
     if parallel and len(tiles) > 1:
         ncpu = min(len(tiles), max(1, multiprocessing.cpu_count() - 1), 10)
         if verbose:
-            print(f"Downloading {len(tiles)} tiles in parallel "
+            logger.info(f"Downloading {len(tiles)} tiles in parallel "
                   f"({ncpu} threads)...")
         tile_files = [None] * len(tiles)
         with ThreadPoolExecutor(max_workers=ncpu) as executor:
@@ -655,19 +658,19 @@ def get_fcc(
                 tile_files[idx] = future.result()
     else:
         if verbose:
-            print("Downloading tiles sequentially...")
+            logger.info("Downloading tiles sequentially...")
         tile_files = [_download_tile(args) for args in download_args]
 
     # ---- Check results ----
     n_ok = sum(1 for f in tile_files if f is not None)
     n_fail = len(tiles) - n_ok
     if verbose:
-        print(f"Download complete: {n_ok}/{len(tiles)} tiles OK"
+        logger.info(f"Download complete: {n_ok}/{len(tiles)} tiles OK"
               + (f", {n_fail} failed" if n_fail > 0 else ""))
 
     # ---- Mosaic tiles ----
     if verbose:
-        print("Mosaicking tiles...")
+        logger.info("Mosaicking tiles...")
 
     # First mosaic to a temporary file (full extent)
     aoi_is_vector = isinstance(aoi, (str, Path)) and os.path.isfile(str(aoi))
@@ -678,7 +681,7 @@ def get_fcc(
         _mosaic_tiles(tile_files, mosaic_tmp, crop_extent=None)
 
         if verbose:
-            print("Clipping to AOI vector boundary...")
+            logger.info("Clipping to AOI vector boundary...")
         _clip_to_vector(mosaic_tmp, output_file, str(aoi), buff=0.0)
 
         # Cleanup temp mosaic
@@ -706,7 +709,7 @@ def get_fcc(
     # ---- Export individual bands ----
     if export_individual:
         if verbose:
-            print("Exporting individual forest bands...")
+            logger.info("Exporting individual forest bands...")
         band_files = export_bands(
             input_file=output_file,
             output_dir=output_dir,
@@ -718,7 +721,7 @@ def get_fcc(
     # ---- Export FCC trajectory raster ----
     if export_fcc:
         if verbose:
-            print("Computing FCC trajectory raster...")
+            logger.info("Computing FCC trajectory raster...")
         indices = "".join(str(i + 1) for i in range(len(years)))
         fcc_file = os.path.join(output_dir, f"fcc{indices}.tif")
         sum_raster_bands(
@@ -731,7 +734,7 @@ def get_fcc(
     # ---- Export period FCC rasters ----
     if export_period and len(years) >= 2:
         if verbose:
-            print("Exporting period deforestation rasters...")
+            logger.info("Exporting period deforestation rasters...")
         period_files = export_period_fcc(
             input_file=output_file,
             output_dir=output_dir,
@@ -742,7 +745,7 @@ def get_fcc(
     # ---- Reproject all outputs ----
     if output_crs is not None:
         if verbose:
-            print(f"Reprojecting all outputs to {output_crs}...")
+            logger.info(f"Reprojecting all outputs to {output_crs}...")
 
         # Collect all files to reproject
         all_files = [output_file]
@@ -765,21 +768,21 @@ def get_fcc(
                 os.remove(tmp)
 
     if verbose:
-        print("=" * 60)
-        print("All outputs:")
+        logger.info("=" * 60)
+        logger.info("All outputs:")
         crs_label = f" [{output_crs}]" if output_crs else " [EPSG:4326]"
-        print(f"  Projection              : {crs_label.strip(' []')}")
-        print(f"  Multi-band forest cover : {output_file}")
+        logger.info(f"  Projection              : {crs_label.strip(' []')}")
+        logger.info(f"  Multi-band forest cover : {output_file}")
         if export_individual:
             for bf in result["forest_bands"]:
-                print(f"  Individual band         : {bf}")
+                logger.info(f"  Individual band         : {bf}")
         if export_fcc:
-            print(f"  FCC trajectory          : {result['fcc']}")
+            logger.info(f"  FCC trajectory          : {result['fcc']}")
         if export_period and "fcc_periods" in result:
             for pf in result["fcc_periods"]:
-                print(f"  Period deforestation    : {pf}")
-        print("=" * 60)
-        print("Done!")
+                logger.info(f"  Period deforestation    : {pf}")
+        logger.info("=" * 60)
+        logger.info("Done!")
 
     return result
 
@@ -813,11 +816,11 @@ def download_forest(ctx: RunContext, use_cache: bool = True) -> dict:
         for _f in _cache_d.iterdir():
             if _f.name != "metadata.json":
                 shutil.copy2(_f, out_dir / _f.name)
-        print("Forest: loaded from cross-run cache.")
+        logger.info("Forest: loaded from cross-run cache.")
         return {"forest_cover": str(out_dir / "forest_cover.tif")}
 
     if use_cache and (out_dir / "fcc23.tif").exists():
-        print("Forest: outputs already present in run folder, skipping.")
+        logger.info("Forest: outputs already present in run folder, skipping.")
         return {"forest_cover": str(out_dir / "forest_cover.tif")}
 
     ee.Initialize(

@@ -22,12 +22,15 @@ fixed-``SCALE`` forest copy was a special case); callers pass their own scale.
 import os
 import math
 import time
+import logging
 from pathlib import Path
 
 import ee
 from osgeo import gdal, ogr, osr
 
 from palmdef_risk.constants import NODATA_BYTE, GTIFF_OPTS
+
+logger = logging.getLogger(__name__)
 
 # Suppress GDAL warnings (callers also call this, harmless to repeat).
 gdal.UseExceptions()
@@ -169,7 +172,7 @@ def _download_tile(args):
 
     if n_cols == 0 or n_rows == 0:
         if verbose:
-            print(f"  Tile {tile_index} SKIPPED: zero dimension")
+            logger.info(f"  Tile {tile_index} SKIPPED: zero dimension")
         return None
 
     request = {
@@ -203,19 +206,19 @@ def _download_tile(args):
             ds = None
 
             if verbose:
-                print(f"  Tile {tile_index} OK "
+                logger.info(f"  Tile {tile_index} OK "
                       f"({n_cols}x{n_rows} px, {n_bands} bands)")
             return tile_file
 
         except Exception as e:
             if verbose:
-                print(f"  Tile {tile_index} attempt {attempt}/{max_retries} "
+                logger.warning(f"  Tile {tile_index} attempt {attempt}/{max_retries} "
                       f"FAILED: {e}")
             if attempt < max_retries:
                 time.sleep(min(2 ** attempt, 30))
 
     if verbose:
-        print(f"  Tile {tile_index} FAILED after {max_retries} attempts")
+        logger.warning(f"  Tile {tile_index} FAILED after {max_retries} attempts")
     return None
 
 
