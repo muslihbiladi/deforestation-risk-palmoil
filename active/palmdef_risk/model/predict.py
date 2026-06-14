@@ -197,23 +197,17 @@ def predict_risk(ctx: RunContext, model_path: Path, variant: str) -> Path:
     Returns path to risk_<variant>.tif.
     """
     import forestatrisk as far
-    from patsy import dmatrices
-    from palmdef_risk.model.icar import prepare_sample
+    from palmdef_risk.model.icar import load_design_matrix
 
     with open(model_path, "rb") as fh:
         state = pickle.load(fh)
 
     # Rebuild patsy DesignInfo from sample.csv (never pickle DesignInfo directly).
-    # Must dropna on scaled columns BEFORE dmatrices so scale() statistics match
-    # what fit_model used.  Any NaN row causes scale() to store NaN as its mean,
-    # which makes build_design_matrices return 0 rows at prediction time.
+    # dropna="scaled" drops NaN on the scale()-wrapped columns BEFORE dmatrices so
+    # scale() statistics match what fit_model used. Any NaN row would make scale()
+    # store NaN as its mean → build_design_matrices returns 0 rows at predict time.
     sample_path = ctx.output_dir / "sample.csv"
-    data = pd.read_csv(sample_path)
-    data = prepare_sample(data)
-    scaled_cols = re.findall(r"scale\((\w+)\)", state["formula"])
-    if scaled_cols:
-        data = data.dropna(subset=scaled_cols)
-    y, x = dmatrices(state["formula"], data, return_type="matrix")
+    _, y, x = load_design_matrix(ctx, variant, state["formula"], dropna="scaled")
 
     pred_mod = far.icarModelPred(
         formula=state["formula"],
@@ -285,8 +279,7 @@ def predict_forecast(ctx: RunContext, model_path: Path, variant: str) -> Optiona
     var_dir lacks a required covariate raster.
     """
     import forestatrisk as far
-    from patsy import dmatrices
-    from palmdef_risk.model.icar import prepare_sample
+    from palmdef_risk.model.icar import load_design_matrix
 
     with open(model_path, "rb") as fh:
         state = pickle.load(fh)
@@ -302,12 +295,8 @@ def predict_forecast(ctx: RunContext, model_path: Path, variant: str) -> Optiona
 
     # Rebuild DesignInfo from sample.csv (never pickle DesignInfo).
     sample_path = ctx.output_dir / "sample.csv"
-    data = pd.read_csv(sample_path)
-    data = prepare_sample(data)
-    scaled_cols = re.findall(r"scale\((\w+)\)", state["formula"])
-    if scaled_cols:
-        data = data.dropna(subset=scaled_cols)
-    y, x = dmatrices(state["formula"], data, return_type="matrix")
+    _, y, x = load_design_matrix(ctx, variant, state["formula"], dropna="scaled")
+    scaled_cols = re.findall(r"scale\((\w+)\)", state["formula"])  # reused below
 
     pred_mod = far.icarModelPred(
         formula=state["formula"],

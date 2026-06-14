@@ -35,23 +35,14 @@ def _predict_in_sample(
     ctx: "RunContext", state: dict, variant: str
 ) -> tuple[np.ndarray, np.ndarray, list[str]]:
     """Return (p_hat, y_obs, beta_names) for variant's training subset."""
-    from patsy import dmatrices
-    from palmdef_risk.model.icar import prepare_sample, _LOG_DIST_COLS, variant_extra_cols
+    from palmdef_risk.model.icar import load_design_matrix
 
     cache_key = (str(ctx.output_dir), variant)
     cached = _IN_SAMPLE_CACHE.get(cache_key)
     if cached is not None:
         return cached
 
-    data = pd.read_csv(ctx.output_dir / "sample.csv")
-    data = prepare_sample(data)
-    base_cols = ["fcc23", "altitude", "slope", "protected", "cell"] + [
-        f"log_{c}" for c in _LOG_DIST_COLS
-    ]
-    extra_cols = variant_extra_cols(variant)
-    data = data.dropna(subset=base_cols + extra_cols)
-
-    y, x = dmatrices(state["formula"], data, return_type="matrix")
+    data, y, x = load_design_matrix(ctx, variant, state["formula"], dropna="base")
     x_arr = np.asarray(x)
     y_arr = np.asarray(y)
     col_names = list(x.design_info.column_names)

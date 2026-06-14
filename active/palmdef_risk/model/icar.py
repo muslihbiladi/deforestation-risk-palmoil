@@ -1,6 +1,7 @@
 from __future__ import annotations
 import logging
 import pickle
+import re
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -45,6 +46,18 @@ def variant_extra_cols(variant: str) -> list[str]:
             f"Unknown variant: {variant!r}. Valid variants: A, B, C, D, E"
         )
     return list(_VARIANT_EXTRA_COLS[variant])
+
+
+def base_dropna_cols() -> list[str]:
+    """Columns that must be non-NaN before the design matrix is built.
+
+    Single source for the base dropna subset shared by fit (_build_and_fit),
+    diagnostics, and reports — previously hard-coded identically in each.
+    Variant-specific extras come from variant_extra_cols().
+    """
+    return ["fcc23", "altitude", "slope", "protected", "cell"] + [
+        f"log_{c}" for c in _LOG_DIST_COLS
+    ]
 
 
 def build_formula(variant: str, data: pd.DataFrame) -> str:
@@ -102,6 +115,54 @@ def prepare_sample(data: pd.DataFrame) -> pd.DataFrame:
     return data
 
 
+def load_design_matrix(
+    ctx: "RunContext",
+    variant: str,
+    formula: str,
+    dropna: str = "base",
+) -> tuple[pd.DataFrame, "np.ndarray", "np.ndarray"]:
+    """Rebuild the patsy design matrices for a fitted variant from sample.csv.
+
+    Reads ``<ctx.output_dir>/sample.csv``, applies prepare_sample(), drops NaN
+    rows per ``dropna``, then builds (y, x) from ``formula``. This is the
+    canonical "rebuild from sample.csv at predict time" path — it never pickles
+    or loads a patsy DesignInfo (project rule).
+
+    Single source for the sample-load + design-matrix logic previously
+    triplicated across diagnostics, reports, and predict (×2).
+
+    dropna:
+      ``"base"``   – drop NaN on base_dropna_cols() + variant_extra_cols(variant);
+                     matches fit_model. Used by diagnostics and reports.
+      ``"scaled"`` – drop NaN only on the scale()-wrapped columns parsed from
+                     ``formula``, so scale() statistics match what fit_model
+                     computed. Used by predict (the row subset must equal the
+                     fit-time subset for the scale means/stds to line up).
+
+    Returns ``(data, y, x)``: the surviving DataFrame and the patsy y / x
+    matrices (each carrying a fresh ``.design_info``).
+    """
+    from patsy import dmatrices
+
+    data = pd.read_csv(ctx.output_dir / "sample.csv")
+    data = prepare_sample(data)
+
+    if dropna == "base":
+        subset = base_dropna_cols() + variant_extra_cols(variant)
+        data = data.dropna(subset=subset)
+    elif dropna == "scaled":
+        scaled_cols = re.findall(r"scale\((\w+)\)", formula)
+        if scaled_cols:
+            data = data.dropna(subset=scaled_cols)
+    else:
+        raise ValueError(
+            f"Unknown dropna mode: {dropna!r}. Use 'base' or 'scaled'."
+        )
+
+    y, x = dmatrices(formula, data, return_type="matrix")
+    return data, y, x
+
+
 def _build_and_fit(
     variant: str,
     ctx: "RunContext",
@@ -122,12 +183,9 @@ def _build_and_fit(
 
     # patsy's scale() sums all values including NaN → mean becomes NaN → all rows dropped.
     # Drop NaN rows on formula columns BEFORE building the formula.
-    base_cols = ["fcc23", "altitude", "slope", "protected", "cell"] + [
-        f"log_{c}" for c in _LOG_DIST_COLS
-    ]
     extra_cols = variant_extra_cols(variant)
     n_before = len(data)
-    data = data.dropna(subset=base_cols + extra_cols)
+    data = data.dropna(subset=base_dropna_cols() + extra_cols)
     if (n_dropped := n_before - len(data)):
         logger.warning("Dropped %d rows with NaN in formula columns", n_dropped)
 

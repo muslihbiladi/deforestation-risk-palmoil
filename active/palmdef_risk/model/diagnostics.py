@@ -98,16 +98,7 @@ def compute_residuals_all(
     p_hat = sigmoid(X_fixed @ betas + rho[cell]), and returns Bernoulli
     deviance residuals alongside the (X, Y) coords of the surviving rows.
     """
-    from patsy import dmatrices
-    from palmdef_risk.model.icar import prepare_sample, _LOG_DIST_COLS, variant_extra_cols
-
-    sample_path = ctx.output_dir / "sample.csv"
-    base_data = pd.read_csv(sample_path)
-    base_data = prepare_sample(base_data)
-
-    base_cols = ["fcc23", "altitude", "slope", "protected", "cell"] + [
-        f"log_{c}" for c in _LOG_DIST_COLS
-    ]
+    from palmdef_risk.model.icar import load_design_matrix
 
     from tqdm.auto import tqdm
     residuals: dict[str, np.ndarray] = {}
@@ -122,13 +113,11 @@ def compute_residuals_all(
         with open(pkl_path, "rb") as fh:
             state = pickle.load(fh)
 
-        extra_cols = variant_extra_cols(variant)
-        data = base_data.dropna(subset=base_cols + extra_cols)
+        data, y, x = load_design_matrix(ctx, variant, state["formula"], dropna="base")
         if len(data) == 0:
             logger.warning("No rows survive dropna for variant %s — skipping", variant)
             continue
 
-        y, x = dmatrices(state["formula"], data, return_type="matrix")
         x_arr = np.asarray(x)
         y_arr = np.asarray(y)
 
