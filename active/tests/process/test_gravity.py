@@ -106,3 +106,55 @@ def test_orthogonalize_produces_residual_raster(tmp_path, write_raster):
     ds = None
     valid = resid[resid != -9999.0]
     assert abs(valid.mean()) < 0.1
+
+
+def _orthogonalize_baseline(gpath, rpath, tpath):
+    """Pre-refactor full-array OLS residual (no early frees) — the baseline."""
+    def load(p):
+        ds = gdal.Open(str(p))
+        arr = ds.GetRasterBand(1).ReadAsArray().astype(np.float64)
+        nd = ds.GetRasterBand(1).GetNoDataValue()
+        ds = None
+        return arr, nd
+    g_arr, g_nd = load(gpath)
+    r_arr, r_nd = load(rpath)
+    t_arr, t_nd = load(tpath)
+    mask = (g_arr != g_nd) & (r_arr != r_nd) & (t_arr != t_nd)
+    g, r, t = g_arr[mask], r_arr[mask], t_arr[mask]
+    X = np.column_stack([np.ones(len(g)), r, t])
+    beta, *_ = np.linalg.lstsq(X, g, rcond=None)
+    residual = g - X @ beta
+    resid_arr = np.full(g_arr.shape, -9999.0, dtype=np.float32)
+    resid_arr[mask] = residual.astype(np.float32)
+    return resid_arr
+
+
+def test_orthogonalize_freeing_inputs_matches_baseline(tmp_path, write_raster):
+    """Freeing the full inputs early must leave the residual raster byte-identical
+    to the pre-refactor full-array computation (same float64 OLS, same order)."""
+    from palmdef_risk.process.gravity import orthogonalize_gravity
+    rng = np.random.default_rng(123)
+    gt = [500000, 100, 0, 9005000, 0, -100]
+    gravity = rng.uniform(0, 1, (25, 25)).astype(np.float32)
+    road = rng.uniform(0, 5000, (25, 25)).astype(np.float32)
+    town = rng.uniform(0, 20000, (25, 25)).astype(np.float32)
+    # Scatter NoData so the mask (intersection of all three) is exercised.
+    gravity[0, :] = -9999.0
+    road[5:8, 5:8] = -9999.0
+    town[20, 20] = -9999.0
+    g_path = write_raster(tmp_path / "gravity_raw.tif", gravity, gt, 32750,
+                          dtype=gdal.GDT_Float32, nodata=-9999.0)
+    r_path = write_raster(tmp_path / "dist_road.tif", road, gt, 32750,
+                          dtype=gdal.GDT_Float32, nodata=-9999.0)
+    t_path = write_raster(tmp_path / "dist_town.tif", town, gt, 32750,
+                          dtype=gdal.GDT_Float32, nodata=-9999.0)
+    out = tmp_path / "gravity_resid.tif"
+    orthogonalize_gravity(g_path, r_path, t_path, out)
+
+    ds = gdal.Open(str(out))
+    got = ds.GetRasterBand(1).ReadAsArray()
+    nd = ds.GetRasterBand(1).GetNoDataValue()
+    ds = None
+    expected = _orthogonalize_baseline(g_path, r_path, t_path)
+    assert np.array_equal(got, expected)
+    assert nd == -9999.0

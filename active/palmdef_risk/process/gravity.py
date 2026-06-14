@@ -111,15 +111,24 @@ def orthogonalize_gravity(
     g = g_arr[mask]
     r = r_arr[mask]
     t = t_arr[mask]
+    # Free the three full-raster float64 inputs as soon as the masked vectors are
+    # extracted — the OLS and residual-write phases use only the 1-D vectors, so
+    # otherwise these full arrays stay resident alongside X/g_hat/residual_flat
+    # and the output, roughly doubling peak RSS on full-AOI gravity rasters.
+    del g_arr, r_arr, t_arr
 
     X = np.column_stack([np.ones(len(g)), r, t])
+    del r, t  # values are now copied into X
     beta, *_ = np.linalg.lstsq(X, g, rcond=None)
     g_hat = X @ beta
+    del X
     residual_flat = g - g_hat
+    del g_hat
 
     ss_res = np.sum(residual_flat ** 2)
     ss_tot = np.sum((g - g.mean()) ** 2)
     r2 = 1.0 - ss_res / ss_tot if ss_tot > 0 else 0.0
+    del g
 
     if r2 > 0.85:
         logger.warning(
