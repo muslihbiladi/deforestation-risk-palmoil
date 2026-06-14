@@ -8,6 +8,8 @@ import pickle
 import numpy as np
 import pandas as pd
 
+from palmdef_risk.parallel import run_parallel
+
 if TYPE_CHECKING:
     from palmdef_risk.io.run import RunContext
 
@@ -339,49 +341,107 @@ def predict_forecast(ctx: RunContext, model_path: Path, variant: str) -> Optiona
     return risk_path
 
 
-def predict_all(ctx: RunContext) -> list[Path]:
-    """Predict risk for all fitted model variants."""
-    from tqdm.auto import tqdm
-    results = []
-    variants = list(ctx.config.model_variants)
-    build_forecast_vardir(ctx)
-    for variant in tqdm(variants, desc="Predicting risk", unit="variant"):
+def _prewarm_derived_rasters(ctx: RunContext) -> None:
+    """Pre-create the shared derived covariate rasters (log-distance, HGU spline)
+    once, before the parallel pool, into both the t2 data dir and the forecast
+    dir. predict_risk / predict_forecast otherwise create these on demand into the
+    *shared* data dir; running variants concurrently would race two processes
+    writing the same log_dist_*.tif / hgu_b*.tif. Building them here (idempotent,
+    existence-guarded) makes every per-variant worker a no-op for these files.
+    """
+    sample_path = ctx.output_dir / "sample.csv"
+    fcast = ctx.data_dir / "forecast"
+    for variant in ctx.config.model_variants:
         model_path = ctx.output_dir / "models" / f"model_{variant}" / f"mod_{variant}.pkl"
         if not model_path.exists():
-            logger.warning("Model pkl not found, skipping variant %s: %s", variant, model_path)
             continue
-        risk_path = ctx.output_dir / "predictions" / f"risk_{variant}.tif"
-        if risk_path.exists():
-            logger.info("risk_%s.tif exists — skipping prediction", variant)
-            results.append(risk_path)
-        else:
-            try:
-                risk_path = predict_risk(ctx, model_path, variant)
-                results.append(risk_path)
-            except Exception:
-                import traceback
-                logger.error("Prediction failed for variant %s:\n%s", variant, traceback.format_exc())
-                continue
+        with open(model_path, "rb") as fh:
+            formula = pickle.load(fh)["formula"]
+        _create_log_dist_rasters(ctx.data_dir, formula)
+        _create_hgu_spline_rasters(ctx.data_dir, formula, sample_path)
+        if fcast.exists():
+            _create_log_dist_rasters(fcast, formula)
+            _create_hgu_spline_rasters(fcast, formula, sample_path)
+
+
+def _predict_one_variant(task: tuple) -> list[str]:
+    """Module-level worker: predict + project + forecast for one variant.
+
+    Mirrors the previous per-variant try/except/continue and skip-guards so a
+    single variant's failure is logged but does not abort the others — the
+    exception must not reach the pool (run_parallel would otherwise propagate it
+    and kill the run). Returns the output paths produced (as strings). The run
+    dir is reloaded into a RunContext (paths cross the pool, not live objects).
+    """
+    variant, run_dir = task
+    from palmdef_risk.io.run import load_run
+    ctx = load_run(run_dir)
+    out: list[str] = []
+
+    model_path = ctx.output_dir / "models" / f"model_{variant}" / f"mod_{variant}.pkl"
+    if not model_path.exists():
+        logger.warning("Model pkl not found, skipping variant %s: %s", variant, model_path)
+        return out
+
+    risk_path = ctx.output_dir / "predictions" / f"risk_{variant}.tif"
+    if risk_path.exists():
+        logger.info("risk_%s.tif exists — skipping prediction", variant)
+        out.append(str(risk_path))
+    else:
         try:
-            future_path = project_future(ctx, risk_path, variant)
-            if future_path is not None:
-                results.append(future_path)
+            risk_path = predict_risk(ctx, model_path, variant)
+            out.append(str(risk_path))
         except Exception:
             import traceback
-            logger.error("Future projection failed for variant %s:\n%s", variant, traceback.format_exc())
-        # t3 forecast risk (decision deferred: does NOT yet feed project_future)
-        fc_path = ctx.output_dir / "predictions" / f"risk_{variant}_forecast.tif"
-        if fc_path.exists():
-            logger.info("risk_%s_forecast.tif exists — skipping forecast", variant)
-            results.append(fc_path)
-        else:
-            try:
-                fc = predict_forecast(ctx, model_path, variant)
-                if fc is not None:
-                    results.append(fc)
-            except Exception:
-                import traceback
-                logger.error("Forecast prediction failed for variant %s:\n%s", variant, traceback.format_exc())
+            logger.error("Prediction failed for variant %s:\n%s", variant, traceback.format_exc())
+            return out  # no risk raster → skip projection + forecast (was `continue`)
+
+    try:
+        future_path = project_future(ctx, risk_path, variant)
+        if future_path is not None:
+            out.append(str(future_path))
+    except Exception:
+        import traceback
+        logger.error("Future projection failed for variant %s:\n%s", variant, traceback.format_exc())
+
+    # t3 forecast risk (decision deferred: does NOT yet feed project_future)
+    fc_path = ctx.output_dir / "predictions" / f"risk_{variant}_forecast.tif"
+    if fc_path.exists():
+        logger.info("risk_%s_forecast.tif exists — skipping forecast", variant)
+        out.append(str(fc_path))
+    else:
+        try:
+            fc = predict_forecast(ctx, model_path, variant)
+            if fc is not None:
+                out.append(str(fc))
+        except Exception:
+            import traceback
+            logger.error("Forecast prediction failed for variant %s:\n%s", variant, traceback.format_exc())
+    return out
+
+
+def predict_all(ctx: RunContext) -> list[Path]:
+    """Predict risk for all fitted model variants in parallel via run_parallel.
+
+    build_forecast_vardir and the shared derived rasters are prepared once
+    (variant-invariant); each variant is then predicted in its own process,
+    bounded by ram_per_predict_gb. Per-variant failures are isolated (logged,
+    others proceed), matching the previous sequential loop.
+    """
+    cfg = ctx.config
+    variants = list(cfg.model_variants)
+    build_forecast_vardir(ctx)
+    _prewarm_derived_rasters(ctx)
+
+    tasks = [(v, str(ctx.run_dir)) for v in variants]
+    nested = run_parallel(
+        _predict_one_variant, tasks,
+        ram_per_task_gb=cfg.ram_per_predict_gb, cfg=cfg,
+        desc="Predicting risk",
+    )
+    results: list[Path] = []
+    for paths in nested:
+        results.extend(Path(p) for p in (paths or []))
     return results
 
 

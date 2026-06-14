@@ -7,6 +7,8 @@ from typing import TYPE_CHECKING
 import numpy as np
 import pandas as pd
 
+from palmdef_risk.parallel import run_parallel
+
 if TYPE_CHECKING:
     from palmdef_risk.io.run import RunContext
 
@@ -182,29 +184,65 @@ def fit_model(
     return pkl_path
 
 
+def _fit_one_variant(task: tuple) -> str:
+    """Module-level worker: fit one variant in its own process.
+
+    Data crosses the pool boundary as paths, never live objects (CLAUDE.md
+    "parallelism"): the run dir is reloaded into a RunContext, and the shared,
+    variant-invariant cellneigh adjacency is loaded from .npy rather than pickled
+    through the pool. Honors the pkl skip-guard. Re-raises on failure so fit_all
+    stays fail-fast (run_parallel propagates the exception via future.result()).
+    """
+    variant, run_dir, nneigh_path, adj_path = task
+    from palmdef_risk.io.run import load_run
+    ctx = load_run(run_dir)
+    pkl_path = ctx.output_dir / "models" / f"model_{variant}" / f"mod_{variant}.pkl"
+    if pkl_path.exists():
+        logger.info("mod_%s.pkl exists — skipping fit", variant)
+        return str(pkl_path)
+    nneigh = np.load(nneigh_path)
+    adj = np.load(adj_path)
+    try:
+        return str(fit_model(variant, ctx, nneigh=nneigh, adj=adj))
+    except Exception:
+        import traceback
+        logger.error("Model %s failed:\n%s", variant, traceback.format_exc())
+        raise  # Re-raise so the notebook shows the real error (fail-fast)
+
+
 def fit_all(ctx: "RunContext") -> list[Path]:
-    """Fit all configured model variants sequentially."""
+    """Fit all configured model variants in parallel via run_parallel.
+
+    cellneigh is computed once (variant-invariant) and persisted to .npy so each
+    worker loads the shared adjacency by path. One process per variant, bounded
+    by ram_per_icar_gb. A worker failure propagates (fail-fast), matching the
+    previous sequential loop.
+    """
     import forestatrisk as far
-    from tqdm.auto import tqdm
-    results = []
-    variants = list(ctx.config.model_variants)
     cfg = ctx.config
+    variants = list(cfg.model_variants)
     nneigh, adj = far.cellneigh(
         raster=str(ctx.data_dir / "fcc23.tif"),
         csize=cfg.csize,
         rank=1,
     )
-    for v in tqdm(variants, desc="Fitting iCAR models", unit="variant"):
-        pkl_path = ctx.output_dir / "models" / f"model_{v}" / f"mod_{v}.pkl"
-        if pkl_path.exists():
-            logger.info("mod_%s.pkl exists — skipping fit", v)
-            results.append(pkl_path)
-            continue
-        try:
-            path = fit_model(v, ctx, nneigh=nneigh, adj=adj)
-            results.append(path)
-        except Exception:
-            import traceback
-            logger.error("Model %s failed:\n%s", v, traceback.format_exc())
-            raise  # Re-raise so the notebook shows the real error
-    return results
+    models_dir = ctx.output_dir / "models"
+    models_dir.mkdir(parents=True, exist_ok=True)
+    nneigh_path = models_dir / "_cellneigh_nneigh.npy"
+    adj_path = models_dir / "_cellneigh_adj.npy"
+    np.save(nneigh_path, np.asarray(nneigh))
+    np.save(adj_path, np.asarray(adj))
+
+    tasks = [
+        (v, str(ctx.run_dir), str(nneigh_path), str(adj_path)) for v in variants
+    ]
+    try:
+        paths = run_parallel(
+            _fit_one_variant, tasks,
+            ram_per_task_gb=cfg.ram_per_icar_gb, cfg=cfg,
+            desc="Fitting iCAR models",
+        )
+    finally:
+        nneigh_path.unlink(missing_ok=True)
+        adj_path.unlink(missing_ok=True)
+    return [Path(p) for p in paths]

@@ -2,8 +2,119 @@ import pytest
 import numpy as np
 import pandas as pd
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import patch, MagicMock
 import pickle
+
+
+_PREDICT_FORMULA = "I(1 - fcc23) + trial ~ scale(altitude) + protected + cell"
+
+
+def _setup_run_with_models(tmp_path, minimal_config_yaml, variants=("A", "B")):
+    """A materialized run with sample.csv + a fitted-state pkl per variant."""
+    from palmdef_risk.io.run import create_run
+    ctx = create_run(minimal_config_yaml, runs_root=tmp_path / "runs")
+    ctx.output_dir.mkdir(parents=True, exist_ok=True)
+    _make_sample_csv(ctx.output_dir)
+    for v in variants:
+        md = ctx.output_dir / "models" / f"model_{v}"
+        md.mkdir(parents=True, exist_ok=True)
+        state = {"formula": _PREDICT_FORMULA, "betas": np.zeros(3),
+                 "rho": np.zeros(10), "variant": v}
+        with open(md / f"mod_{v}.pkl", "wb") as f:
+            pickle.dump(state, f)
+    return ctx
+
+
+def test_predict_all_predicts_every_variant_in_parallel(tmp_path, minimal_config_yaml,
+                                                        monkeypatch):
+    """predict_all dispatches one worker per variant via run_parallel."""
+    from palmdef_risk.model import predict
+    import palmdef_risk.parallel as parallel_mod
+
+    ctx = _setup_run_with_models(tmp_path, minimal_config_yaml)  # A, B
+    monkeypatch.setattr("palmdef_risk.parallel.adaptive_workers", lambda *a, **k: 1)
+    spy = MagicMock(side_effect=parallel_mod.run_parallel)
+    monkeypatch.setattr(predict, "run_parallel", spy, raising=False)
+
+    calls = []
+
+    def fake_predict_risk(c, model_path, variant):
+        calls.append(variant)
+        rp = c.output_dir / "predictions" / f"risk_{variant}.tif"
+        rp.parent.mkdir(parents=True, exist_ok=True)
+        rp.write_bytes(b"x")
+        return rp
+
+    monkeypatch.setattr(predict, "predict_risk", fake_predict_risk)
+    monkeypatch.setattr(predict, "project_future", lambda *a, **k: None)
+    monkeypatch.setattr(predict, "predict_forecast", lambda *a, **k: None)
+
+    paths = predict.predict_all(ctx)
+
+    spy.assert_called_once()
+    assert sorted(calls) == ["A", "B"]
+    assert any("risk_A.tif" in str(p) for p in paths)
+    assert any("risk_B.tif" in str(p) for p in paths)
+
+
+def test_predict_all_skips_existing_risk(tmp_path, minimal_config_yaml, monkeypatch):
+    """A pre-existing risk_<v>.tif must not be re-predicted."""
+    from palmdef_risk.model import predict
+
+    ctx = _setup_run_with_models(tmp_path, minimal_config_yaml)  # A, B
+    monkeypatch.setattr("palmdef_risk.parallel.adaptive_workers", lambda *a, **k: 1)
+    pre = ctx.output_dir / "predictions" / "risk_A.tif"
+    pre.parent.mkdir(parents=True, exist_ok=True)
+    pre.write_bytes(b"existing")
+
+    calls = []
+
+    def fake_predict_risk(c, model_path, variant):
+        calls.append(variant)
+        rp = c.output_dir / "predictions" / f"risk_{variant}.tif"
+        rp.write_bytes(b"x")
+        return rp
+
+    monkeypatch.setattr(predict, "predict_risk", fake_predict_risk)
+    monkeypatch.setattr(predict, "project_future", lambda *a, **k: None)
+    monkeypatch.setattr(predict, "predict_forecast", lambda *a, **k: None)
+
+    predict.predict_all(ctx)
+    assert calls == ["B"]   # A skipped
+
+
+def test_predict_all_isolates_one_variant_failure(tmp_path, minimal_config_yaml,
+                                                  monkeypatch):
+    """One variant's prediction failure is logged but the others proceed (no raise)."""
+    from palmdef_risk.model import predict
+
+    ctx = _setup_run_with_models(tmp_path, minimal_config_yaml)  # A, B
+    monkeypatch.setattr("palmdef_risk.parallel.adaptive_workers", lambda *a, **k: 1)
+
+    def fake_predict_risk(c, model_path, variant):
+        if variant == "A":
+            raise RuntimeError("predict boom A")
+        rp = c.output_dir / "predictions" / f"risk_{variant}.tif"
+        rp.parent.mkdir(parents=True, exist_ok=True)
+        rp.write_bytes(b"x")
+        return rp
+
+    monkeypatch.setattr(predict, "predict_risk", fake_predict_risk)
+    monkeypatch.setattr(predict, "project_future", lambda *a, **k: None)
+    monkeypatch.setattr(predict, "predict_forecast", lambda *a, **k: None)
+
+    paths = predict.predict_all(ctx)   # must NOT raise
+    assert any("risk_B.tif" in str(p) for p in paths)
+    assert not any("risk_A.tif" in str(p) for p in paths)
+
+
+def test_predict_worker_is_picklable():
+    """ProcessPoolExecutor pickles the worker by reference — it must be a
+    module-level function and its task tuple must be picklable."""
+    import pickle as _pickle
+    from palmdef_risk.model.predict import _predict_one_variant
+    assert _pickle.loads(_pickle.dumps(_predict_one_variant)) is _predict_one_variant
+    _pickle.dumps(("A", "runs/x"))
 
 
 class _FakeConfig:
