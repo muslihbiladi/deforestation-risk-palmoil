@@ -373,7 +373,7 @@ def _predict_one_variant(task: tuple) -> list[str]:
     and kill the run). Returns the output paths produced (as strings). The run
     dir is reloaded into a RunContext (paths cross the pool, not live objects).
     """
-    variant, run_dir = task
+    variant, run_dir, area_t2, area_t3 = task
     from palmdef_risk.io.run import load_run
     ctx = load_run(run_dir)
     out: list[str] = []
@@ -397,7 +397,8 @@ def _predict_one_variant(task: tuple) -> list[str]:
             return out  # no risk raster → skip projection + forecast (was `continue`)
 
     try:
-        future_path = project_future(ctx, risk_path, variant)
+        future_path = project_future(ctx, risk_path, variant,
+                                     area_t2=area_t2, area_t3=area_t3)
         if future_path is not None:
             out.append(str(future_path))
     except Exception:
@@ -433,7 +434,18 @@ def predict_all(ctx: RunContext) -> list[Path]:
     build_forecast_vardir(ctx)
     _prewarm_derived_rasters(ctx)
 
-    tasks = [(v, str(ctx.run_dir)) for v in variants]
+    # Forest t2/t3 areas are variant-invariant — compute once here rather than
+    # once per variant inside project_future (countpix scans the full raster).
+    area_t2 = area_t3 = None
+    if cfg.project_future:
+        t2_path = ctx.data_dir / "forest_t2.tif"
+        t3_path = ctx.data_dir / "forest_t3.tif"
+        if t2_path.exists() and t3_path.exists():
+            import forestatrisk as far
+            area_t2 = far.countpix(input_raster=str(t2_path), value=1)["area"]
+            area_t3 = far.countpix(input_raster=str(t3_path), value=1)["area"]
+
+    tasks = [(v, str(ctx.run_dir), area_t2, area_t3) for v in variants]
     nested = run_parallel(
         _predict_one_variant, tasks,
         ram_per_task_gb=cfg.ram_per_predict_gb, cfg=cfg,
@@ -445,7 +457,13 @@ def predict_all(ctx: RunContext) -> list[Path]:
     return results
 
 
-def project_future(ctx: RunContext, risk_path: Path, variant: str) -> Optional[Path]:
+def project_future(
+    ctx: RunContext,
+    risk_path: Path,
+    variant: str,
+    area_t2: Optional[float] = None,
+    area_t3: Optional[float] = None,
+) -> Optional[Path]:
     """Project future forest cover by extrapolating the historical defor rate.
 
     Steps:
@@ -455,6 +473,10 @@ def project_future(ctx: RunContext, risk_path: Path, variant: str) -> Optional[P
       3. Target hectares to deforest = annual_ha × n_years.
       4. far.deforest selects the highest-risk pixels (by risk_<v>.tif) until
          that target hectarage is reached and writes a binary forest mask.
+
+    `area_t2`/`area_t3` (forest hectares at t2/t3) are variant-invariant; pass
+    them in to avoid recomputing far.countpix once per variant. When omitted
+    they are computed here (backward compatible).
 
     Writes <output_dir>/predictions/forest_future_<variant>.tif.
     Returns None when project_future is disabled or n_years ≤ 0.
@@ -479,8 +501,11 @@ def project_future(ctx: RunContext, risk_path: Path, variant: str) -> Optional[P
         return None
 
     # Historical annual deforestation rate (hectares/year) from t2 → t3.
-    area_t2 = far.countpix(input_raster=str(t2_path), value=1)["area"]
-    area_t3 = far.countpix(input_raster=str(t3_path), value=1)["area"]
+    # Areas are variant-invariant — reuse precomputed values when supplied.
+    if area_t2 is None:
+        area_t2 = far.countpix(input_raster=str(t2_path), value=1)["area"]
+    if area_t3 is None:
+        area_t3 = far.countpix(input_raster=str(t3_path), value=1)["area"]
     hist_span = years[-1] - years[-2]
     if hist_span <= 0:
         logger.warning("Invalid forest_years span (%s) — skipping projection", years)

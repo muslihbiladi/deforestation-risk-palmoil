@@ -108,13 +108,48 @@ def test_predict_all_isolates_one_variant_failure(tmp_path, minimal_config_yaml,
     assert not any("risk_A.tif" in str(p) for p in paths)
 
 
+def test_predict_all_computes_forest_areas_once(tmp_path, minimal_config_yaml, monkeypatch):
+    """forest_t2/t3 areas are variant-invariant: countpix must run twice total
+    (one per forest), not twice per variant."""
+    from palmdef_risk.model import predict
+
+    ctx = _setup_run_with_models(tmp_path, minimal_config_yaml)  # A, B
+    ctx.config.project_future = True
+    (ctx.data_dir / "forest_t2.tif").write_bytes(b"x")
+    (ctx.data_dir / "forest_t3.tif").write_bytes(b"x")
+    monkeypatch.setattr("palmdef_risk.parallel.adaptive_workers", lambda *a, **k: 1)
+
+    countpix_calls = []
+
+    def fake_countpix(input_raster, value):
+        countpix_calls.append(input_raster)
+        return {"area": 1000.0}
+
+    def fake_predict_risk(c, model_path, variant):
+        rp = c.output_dir / "predictions" / f"risk_{variant}.tif"
+        rp.parent.mkdir(parents=True, exist_ok=True)
+        rp.write_bytes(b"x")
+        return rp
+
+    monkeypatch.setattr("forestatrisk.countpix", fake_countpix, raising=False)
+    monkeypatch.setattr("forestatrisk.deforest",
+                        lambda **k: {"threshold": 1, "error_perc": 0.0}, raising=False)
+    monkeypatch.setattr(predict, "predict_risk", fake_predict_risk)
+    monkeypatch.setattr(predict, "predict_forecast", lambda *a, **k: None)
+
+    predict.predict_all(ctx)
+
+    # 2 variants would have meant 4 countpix calls in the per-variant version.
+    assert len(countpix_calls) == 2
+
+
 def test_predict_worker_is_picklable():
     """ProcessPoolExecutor pickles the worker by reference — it must be a
     module-level function and its task tuple must be picklable."""
     import pickle as _pickle
     from palmdef_risk.model.predict import _predict_one_variant
     assert _pickle.loads(_pickle.dumps(_predict_one_variant)) is _predict_one_variant
-    _pickle.dumps(("A", "runs/x"))
+    _pickle.dumps(("A", "runs/x", 1000.0, 900.0))
 
 
 class _FakeConfig:
