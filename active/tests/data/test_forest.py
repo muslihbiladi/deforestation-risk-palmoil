@@ -1,3 +1,81 @@
+import numpy as np
+from pathlib import Path
+from osgeo import gdal, osr
+
+
+def _write_multiband_tiled(path, band_arrs, nodata=255, block=16):
+    """Multi-band Byte GeoTIFF, small tiles → exercises windowed export."""
+    ny, nx = band_arrs[0].shape
+    drv = gdal.GetDriverByName("GTiff")
+    ds = drv.Create(
+        str(path), nx, ny, len(band_arrs), gdal.GDT_Byte,
+        options=["TILED=YES", f"BLOCKXSIZE={block}", f"BLOCKYSIZE={block}"],
+    )
+    ds.SetGeoTransform([500000, 30, 0, 9000000, 0, -30])
+    srs = osr.SpatialReference()
+    srs.ImportFromEPSG(32750)
+    ds.SetProjection(srs.ExportToWkt())
+    for i, a in enumerate(band_arrs, start=1):
+        b = ds.GetRasterBand(i)
+        b.WriteArray(a)
+        if nodata is not None:
+            b.SetNoDataValue(nodata)
+    ds.FlushCache()
+    ds = None
+    return path
+
+
+def _read(path):
+    ds = gdal.Open(str(path))
+    arr = ds.GetRasterBand(1).ReadAsArray()
+    nd = ds.GetRasterBand(1).GetNoDataValue()
+    ds = None
+    return arr, nd
+
+
+def test_export_bands_streaming_matches_source(tmp_path):
+    """gdal.Translate per-band export copies each band's values verbatim."""
+    from palmdef_risk.data.forest import export_bands
+    rng = np.random.default_rng(1)
+    bands = [rng.integers(0, 2, (70, 70)).astype(np.uint8) for _ in range(3)]
+    bands[0][0, :] = 255   # nodata-valued pixels must survive the copy
+    src = _write_multiband_tiled(tmp_path / "forest.tif", bands, nodata=255)
+
+    out = export_bands(str(src), output_dir=str(tmp_path), prefix="forest_t",
+                       verbose=False)
+    assert len(out) == 3
+    for b in range(1, 4):
+        got, nd = _read(tmp_path / f"forest_t{b}.tif")
+        assert np.array_equal(got, bands[b - 1]), f"band {b} mismatch"
+        assert nd == 255
+
+
+def test_export_period_fcc_windowed_matches_full(tmp_path):
+    """Windowed period-FCC is bit-identical to the all-bands-in-RAM baseline."""
+    from palmdef_risk.data.forest import export_period_fcc
+    rng = np.random.default_rng(2)
+    bands = [rng.integers(0, 2, (70, 70)).astype(np.uint8) for _ in range(3)]
+    bands[0][3:6, 3:6] = 255   # nodata footprints differ per band
+    bands[1][40, 40] = 255
+    bands[2][0, :] = 255
+    src = _write_multiband_tiled(tmp_path / "forest.tif", bands, nodata=255)
+
+    out = export_period_fcc(str(src), output_dir=str(tmp_path), verbose=False)
+    assert [Path(p).name for p in out] == ["fcc12.tif", "fcc23.tif"]
+
+    # Baseline: the pre-refactor whole-array computation.
+    nodata_mask = np.zeros((70, 70), dtype=bool)
+    for a in bands:
+        nodata_mask |= (a == 255)
+    for i, fname in enumerate(["fcc12.tif", "fcc23.tif"]):
+        fcc = (bands[i].astype(np.uint8) & bands[i + 1].astype(np.uint8))
+        fcc[bands[i] == 0] = 255
+        fcc[nodata_mask] = 255
+        got, nd = _read(tmp_path / fname)
+        assert np.array_equal(got, fcc), f"{fname} mismatch"
+        assert nd == 255
+
+
 def test_download_forest_passes_output_crs(minimal_config_yaml, tmp_path):
     """download_forest must pass output_crs=ctx.config.crs to get_fcc."""
     from unittest.mock import patch

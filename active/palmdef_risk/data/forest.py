@@ -513,31 +513,28 @@ def export_bands(input_file, output_dir=None, prefix="forest_t",
     os.makedirs(output_dir, exist_ok=True)
 
     n_bands = ds.RasterCount
-    n_cols = ds.RasterXSize
-    n_rows = ds.RasterYSize
-    gt = ds.GetGeoTransform()
-    proj = ds.GetProjection()
 
+    # Stream each band out with gdal.Translate(bandList=[b]) — GDAL copies via
+    # internal block I/O, so no full band is ever materialised as a numpy array
+    # (the prior ReadAsArray per band held a full ~1.8 GB Byte band for an
+    # Indonesia-scale raster). Pixel values and the nodata value are preserved,
+    # so the exported band data is identical to the prior path.
     output_files = []
     for b in range(1, n_bands + 1):
-        band_data = ds.GetRasterBand(b).ReadAsArray()
         nd = ds.GetRasterBand(b).GetNoDataValue()
+        nodata_val = int(nd) if nd is not None else 255
         out_path = os.path.join(output_dir, f"{prefix}{b}.tif")
 
-        driver = gdal.GetDriverByName("GTiff")
-        out_ds = driver.Create(
-            out_path, n_cols, n_rows, 1, gdal.GDT_Byte,
-            options=["COMPRESS=DEFLATE", "TILED=YES"],
+        gdal.Translate(
+            out_path, ds,
+            options=gdal.TranslateOptions(
+                format="GTiff",
+                bandList=[b],
+                outputType=gdal.GDT_Byte,
+                noData=nodata_val,
+                creationOptions=["COMPRESS=DEFLATE", "TILED=YES"],
+            ),
         )
-        out_ds.SetGeoTransform(gt)
-        out_ds.SetProjection(proj)
-        out_ds.GetRasterBand(1).WriteArray(band_data)
-        if nd is not None:
-            out_ds.GetRasterBand(1).SetNoDataValue(int(nd))
-        else:
-            out_ds.GetRasterBand(1).SetNoDataValue(255)
-        out_ds.FlushCache()
-        out_ds = None
 
         output_files.append(out_path)
         if verbose:
@@ -592,45 +589,55 @@ def export_period_fcc(input_file, output_dir=None, verbose=True):
         ds = None
         raise ValueError("Need at least 2 bands to compute period FCC.")
 
-    # Read all bands
-    bands = []
-    nodata_mask = np.zeros((n_rows, n_cols), dtype=bool)
-    for b in range(1, n_bands + 1):
-        data = ds.GetRasterBand(b).ReadAsArray()
-        nd = ds.GetRasterBand(b).GetNoDataValue()
-        if nd is not None:
-            nodata_mask |= (data == int(nd))
-        bands.append(data)
-    ds = None
+    # Stream over GDAL block windows: the nodata mask ORs every band, so all
+    # bands are needed per pixel — but only one *block* of each band is held at
+    # a time, not the full bands list + full nodata mask (the prior path kept
+    # all n_bands full arrays resident, ~1.8 GB for Indonesia). Every operation
+    # is elementwise, so per-window output is identical to the whole-array path.
+    src_bands = [ds.GetRasterBand(b) for b in range(1, n_bands + 1)]
+    nds = [b.GetNoDataValue() for b in src_bands]
+    bx, by = src_bands[0].GetBlockSize()
 
+    driver = gdal.GetDriverByName("GTiff")
+    out_dss = []
     output_files = []
     for i in range(n_bands - 1):
-        # fcc_ij: 1 if forest at both ti and tj, 0 if deforested
-        # Pixels not forest at ti are outside the analysis domain → NoData
-        fcc = (bands[i].astype(np.uint8) & bands[i + 1].astype(np.uint8))
-        fcc[bands[i] == 0] = 255
-        fcc[nodata_mask] = 255
-
-        fname = f"fcc{i + 1}{i + 2}.tif"
-        out_path = os.path.join(output_dir, fname)
-
-        driver = gdal.GetDriverByName("GTiff")
+        out_path = os.path.join(output_dir, f"fcc{i + 1}{i + 2}.tif")
         out_ds = driver.Create(
             out_path, n_cols, n_rows, 1, gdal.GDT_Byte,
             options=["COMPRESS=DEFLATE", "TILED=YES"],
         )
         out_ds.SetGeoTransform(gt)
         out_ds.SetProjection(proj)
-        out_ds.GetRasterBand(1).WriteArray(fcc)
         out_ds.GetRasterBand(1).SetNoDataValue(255)
-        out_ds.FlushCache()
-        out_ds = None
-
+        out_dss.append(out_ds)
         output_files.append(out_path)
-        if verbose:
-            print(f"  Period {i+1}→{i+2} exported: {out_path}")
+
+    for yoff in range(0, n_rows, by):
+        ywin = min(by, n_rows - yoff)
+        for xoff in range(0, n_cols, bx):
+            xwin = min(bx, n_cols - xoff)
+            blocks = [b.ReadAsArray(xoff, yoff, xwin, ywin) for b in src_bands]
+            nodata_mask = np.zeros((ywin, xwin), dtype=bool)
+            for data, nd in zip(blocks, nds):
+                if nd is not None:
+                    nodata_mask |= (data == int(nd))
+            for i in range(n_bands - 1):
+                # fcc_ij: 1 if forest at both ti and tj, 0 if deforested.
+                # Pixels not forest at ti are outside the analysis domain → NoData.
+                fcc = (blocks[i].astype(np.uint8) & blocks[i + 1].astype(np.uint8))
+                fcc[blocks[i] == 0] = 255
+                fcc[nodata_mask] = 255
+                out_dss[i].GetRasterBand(1).WriteArray(fcc, xoff, yoff)
+
+    for i, out_ds in enumerate(out_dss):
+        out_ds.FlushCache()
+        out_dss[i] = None
+    ds = None
 
     if verbose:
+        for i, out_path in enumerate(output_files):
+            print(f"  Period {i+1}→{i+2} exported: {out_path}")
         print(f"Exported {len(output_files)} period FCC rasters")
 
     return output_files
