@@ -69,6 +69,31 @@ def test_predict_risk_calls_far_and_returns_path(tmp_path):
     assert (ctx.output_dir / "predictions").is_dir()
 
 
+def test_predict_risk_skips_interpolate_rho_when_rho_exists(tmp_path):
+    """Resumability: a pre-existing rho.tif must not be recomputed."""
+    from palmdef_risk.model.predict import predict_risk
+
+    ctx = _FakeCtx(tmp_path)
+    _make_sample_csv(ctx.output_dir)
+    (ctx.data_dir / "altitude.tif").write_bytes(b"")
+    (ctx.data_dir / "protected.tif").write_bytes(b"")
+
+    formula = "I(1 - fcc23) + trial ~ scale(altitude) + protected + cell"
+    state = {"formula": formula, "betas": np.zeros(3), "rho": np.zeros(10)}
+    pkl_path = tmp_path / "mod_A.pkl"
+    with open(pkl_path, "wb") as fh:
+        pickle.dump(state, fh)
+    # model_dir == pkl_path.parent == tmp_path; pre-create rho.tif.
+    (tmp_path / "rho.tif").write_bytes(b"")
+
+    with patch("forestatrisk.icarModelPred"), \
+         patch("forestatrisk.interpolate_rho") as m_interp, \
+         patch("forestatrisk.predict_raster_binomial_iCAR"):
+        predict_risk(ctx, pkl_path, "A")
+
+    m_interp.assert_not_called()
+
+
 def test_project_future_skipped_when_disabled(tmp_path):
     from palmdef_risk.model.predict import project_future
 

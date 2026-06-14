@@ -214,14 +214,18 @@ def predict_risk(ctx: RunContext, model_path: Path, variant: str) -> Path:
     model_dir = model_path.parent
     rho_path = str(model_dir / "rho.tif")
 
-    # Interpolate posterior-mean rho (cell resolution) to 1 km
-    far.interpolate_rho(
-        rho=state["rho"],
-        input_raster=str(ctx.data_dir / "fcc23.tif"),
-        output_file=rho_path,
-        csize_orig=ctx.config.csize,
-        csize_new=1,
-    )
+    # Interpolate posterior-mean rho (cell resolution) to 1 km — skip if already
+    # done (resumability invariant; interpolate_rho is otherwise re-run on rerun).
+    if not Path(rho_path).exists():
+        far.interpolate_rho(
+            rho=state["rho"],
+            input_raster=str(ctx.data_dir / "fcc23.tif"),
+            output_file=rho_path,
+            csize_orig=ctx.config.csize,
+            csize_new=1,
+        )
+    else:
+        logger.info("rho.tif exists — skipping interpolate_rho")
 
     out_dir = ctx.output_dir / "predictions"
     out_dir.mkdir(parents=True, exist_ok=True)
