@@ -13,6 +13,22 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
+def _gaussian_kernel(sigma_px: float, radius_px: int) -> np.ndarray:
+    """Area-normalized circular Gaussian kernel, zeroed beyond radius_px.
+
+    Built in float32 so the downstream FFT convolution runs in float32
+    (complex64) rather than float64 — halving the peak memory of the gravity
+    surface. exp/normalize in [0, 1] are well within float32 precision.
+    """
+    offs = np.arange(-radius_px, radius_px + 1, dtype=np.float32)
+    yy, xx = np.meshgrid(offs, offs, indexing="ij")
+    d2 = xx ** 2 + yy ** 2  # squared pixel distance from kernel centre
+    kernel = np.exp(-d2 / (2.0 * np.float32(sigma_px) ** 2))
+    kernel[d2 > np.float32(radius_px) ** 2] = 0.0
+    kernel /= kernel.sum()  # area-normalize (matches prior DC-gain-1 FFT)
+    return kernel.astype(np.float32)
+
+
 def _apply_gaussian_filter(
     mill_raster: Path | str,
     out_path: Path | str,
@@ -36,7 +52,9 @@ def _apply_gaussian_filter(
     is removed.
     """
     ds = gdal.Open(str(mill_raster))
-    arr = ds.GetRasterBand(1).ReadAsArray().astype(np.float64)
+    # Read as float32 (mill density is 0/1) so oaconvolve runs in float32 —
+    # halves the peak RAM of the FFT versus the prior float64 upcast.
+    arr = ds.GetRasterBand(1).ReadAsArray().astype(np.float32)
     gt = ds.GetGeoTransform()
     proj = ds.GetProjection()
     pixel_size_m = abs(gt[1])
@@ -45,13 +63,8 @@ def _apply_gaussian_filter(
     sigma_px = (sigma_km * 1000.0) / pixel_size_m
     radius_px = int(np.ceil((radius_km * 1000.0) / pixel_size_m))
 
-    # Circular Gaussian kernel, zeroed beyond radius_px (the hard catchment).
-    offs = np.arange(-radius_px, radius_px + 1, dtype=np.float64)
-    yy, xx = np.meshgrid(offs, offs, indexing="ij")
-    d2 = xx ** 2 + yy ** 2  # squared pixel distance from kernel centre
-    kernel = np.exp(-d2 / (2.0 * sigma_px ** 2))
-    kernel[d2 > radius_px ** 2] = 0.0
-    kernel /= kernel.sum()  # area-normalize (matches prior DC-gain-1 FFT)
+    # Circular Gaussian kernel (float32), zeroed beyond radius_px (hard catchment).
+    kernel = _gaussian_kernel(sigma_px, radius_px)
 
     ny, nx = arr.shape
     result = np.clip(oaconvolve(arr, kernel, mode="same"), 0.0, None).astype(np.float32)

@@ -4,6 +4,43 @@ import pytest
 from osgeo import gdal
 
 
+def test_gaussian_kernel_is_float32_and_normalized():
+    """Kernel must be float32 (so the FFT convolution runs in float32, halving
+    peak RAM) and area-normalized with a hard circular truncation at radius_px."""
+    from palmdef_risk.process.gravity import _gaussian_kernel
+    k = _gaussian_kernel(sigma_px=10.0, radius_px=20)
+    assert k.dtype == np.float32
+    assert k.sum() == pytest.approx(1.0, rel=1e-5)   # area-normalized (Σ=1)
+    assert k[20, 20] == k.max()                       # centre is the maximum
+    assert k[0, 0] == 0.0                             # corner Euclid > radius → truncated
+
+
+def test_gaussian_filter_float32_matches_float64(tmp_path, write_raster):
+    """Running the convolution in float32 must match the float64 surface within
+    a tight tolerance even at a large bandwidth (precision-loss guard)."""
+    from scipy.signal import oaconvolve
+    from palmdef_risk.process.gravity import _apply_gaussian_filter, _gaussian_kernel
+    arr = np.zeros((120, 120), dtype=np.uint8)
+    for r, c in [(40, 40), (60, 75), (80, 30)]:
+        arr[r, c] = 1
+    pixel_m = 100.0
+    ref = write_raster(tmp_path / "mills.tif", arr,
+                       gt=[500000, pixel_m, 0, 9012000, 0, -pixel_m], epsg=32750)
+    out = tmp_path / "gravity_raw.tif"
+    sigma_km, radius_km = 4.0, 8.0  # large σ: 40 px, radius 80 px
+    _apply_gaussian_filter(ref, out, sigma_km=sigma_km, radius_km=radius_km)
+    ds = gdal.Open(str(out))
+    got = ds.GetRasterBand(1).ReadAsArray().astype(np.float64)
+    ds = None
+
+    sigma_px = (sigma_km * 1000.0) / pixel_m
+    radius_px = int(np.ceil((radius_km * 1000.0) / pixel_m))
+    k64 = _gaussian_kernel(sigma_px, radius_px).astype(np.float64)
+    expected = np.clip(oaconvolve(arr.astype(np.float64), k64, mode="same"), 0.0, None)
+    denom = np.maximum(np.abs(expected).max(), 1e-12)
+    assert np.abs(got - expected).max() / denom < 1e-4
+
+
 def test_gaussian_filter_higher_near_source(tmp_path, write_raster):
     from palmdef_risk.process.gravity import _apply_gaussian_filter
     arr = np.zeros((50, 50), dtype=np.uint8)
