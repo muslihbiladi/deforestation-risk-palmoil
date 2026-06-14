@@ -81,6 +81,7 @@ from palmdef_risk.data._ee_utils import (
     _mosaic_tiles,
     _clip_to_vector,
 )
+from palmdef_risk.constants import NODATA_BYTE, NODATA_FLOAT
 
 gdal.UseExceptions()
 
@@ -210,7 +211,7 @@ def _download_ee_raster(ee_image, aoi, output_file, scale=SCALE_90M,
     if crop_to_aoi and aoi_is_vector:
         tmp = output_file.replace(".tif", "_mosaic_tmp.tif")
         _mosaic_tiles(tile_files, tmp)
-        nd = nodata if nodata is not None else 255
+        nd = nodata if nodata is not None else NODATA_BYTE
         _clip_to_vector(tmp, output_file, str(aoi), nodata=nd)
         if os.path.exists(tmp):
             os.remove(tmp)
@@ -423,9 +424,9 @@ def get_srtm(aoi, output_dir="data", buff=0.0, crop_to_aoi=True,
     slp_ds.SetGeoTransform(gt)
     slp_ds.SetProjection(proj)
     slope_arr = ds.GetRasterBand(2).ReadAsArray().astype(np.float32)
-    slope_arr[slope_arr == -32768] = -9999.0  # remap clip sentinel to declared nodata
+    slope_arr[slope_arr == -32768] = NODATA_FLOAT  # remap clip sentinel to declared nodata
     slp_ds.GetRasterBand(1).WriteArray(slope_arr)
-    slp_ds.GetRasterBand(1).SetNoDataValue(-9999.0)
+    slp_ds.GetRasterBand(1).SetNoDataValue(NODATA_FLOAT)
     slp_ds.FlushCache()
     slp_ds = None
     result["slope"] = slp_path
@@ -505,7 +506,7 @@ def get_ghsl(aoi, years, output_dir="data", buff=0.0, crop_to_aoi=True,
             bytes_per_pixel=4,  # source bands are float32; conservative sizing
             buff=buff,
             crop_to_aoi=crop_to_aoi,
-            nodata=255,
+            nodata=NODATA_BYTE,
             parallel=parallel,
             max_retries=max_retries,
             verbose=verbose,

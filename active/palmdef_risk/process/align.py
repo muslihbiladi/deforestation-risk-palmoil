@@ -17,6 +17,7 @@ from palmdef_risk.io.helpers import (
     reproject_vector, rasterize_vector, apply_mask, apply_mask_float,
     remove_if_exists, get_pixel_size_m, raster_shape as _raster_shape,
 )
+from palmdef_risk.constants import NODATA_BYTE, NODATA_FLOAT
 
 log = logging.getLogger(__name__)
 
@@ -64,7 +65,7 @@ def _ensure_forest_utm(ctx: RunContext) -> None:
         log.info("  Reprojected raw forest: %s → %s", fname, ctx.config.crs)
 
 
-def _remap_srtm_voids(path: str, nodata: float = -9999.0) -> None:
+def _remap_srtm_voids(path: str, nodata: float = NODATA_FLOAT) -> None:
     """Replace SRTM void sentinel (-32768) that leaks through bilinear reprojection."""
     ds = gdal.Open(path, gdal.GA_Update)
     arr = ds.GetRasterBand(1).ReadAsArray().astype(np.float32)
@@ -288,7 +289,7 @@ def merge_plantation(
     merged = np.where(
         (arr == industrial_value) | (arr == smallholder_value), 1, 0
     ).astype(np.uint8)
-    merged[nodata_mask] = 255
+    merged[nodata_mask] = NODATA_BYTE
 
     ny, nx = merged.shape
     driver = gdal.GetDriverByName("GTiff")
@@ -297,7 +298,7 @@ def merge_plantation(
     out_ds.SetGeoTransform(gt)
     out_ds.SetProjection(proj)
     out_ds.GetRasterBand(1).WriteArray(merged)
-    out_ds.GetRasterBand(1).SetNoDataValue(255)
+    out_ds.GetRasterBand(1).SetNoDataValue(NODATA_BYTE)
     out_ds.FlushCache()
     out_ds = None
     return Path(dst_path)
@@ -351,7 +352,7 @@ def compute_hgu_signed_distance(
     out_ds.SetGeoTransform(gt)
     out_ds.SetProjection(proj)
     out_ds.GetRasterBand(1).WriteArray(signed)
-    out_ds.GetRasterBand(1).SetNoDataValue(-9999.0)
+    out_ds.GetRasterBand(1).SetNoDataValue(NODATA_FLOAT)
     out_ds.FlushCache()
     out_ds = None
     Path(str(hgu_mask_path)).unlink(missing_ok=True)

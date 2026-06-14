@@ -10,6 +10,7 @@ if TYPE_CHECKING:
     from palmdef_risk.io.run import RunContext
 
 from palmdef_risk.io.helpers import raster_shape as _raster_shape
+from palmdef_risk.constants import NODATA_FLOAT
 
 logger = logging.getLogger(__name__)
 
@@ -66,7 +67,7 @@ def _proximity_from_raster(src_path: Path, out_path: Path, target_value: int = 0
     out_ds.SetProjection(proj)
     gdal.ComputeProximity(mask_band, out_ds.GetRasterBand(1),
                           options=["DISTUNITS=GEO"])
-    out_ds.GetRasterBand(1).SetNoDataValue(-9999.0)
+    out_ds.GetRasterBand(1).SetNoDataValue(NODATA_FLOAT)
     out_ds.FlushCache()
     out_ds = None
     src_ds = None

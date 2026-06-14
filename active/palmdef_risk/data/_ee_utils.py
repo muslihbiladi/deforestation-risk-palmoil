@@ -27,6 +27,8 @@ from pathlib import Path
 import ee
 from osgeo import gdal, ogr, osr
 
+from palmdef_risk.constants import NODATA_BYTE
+
 # Suppress GDAL warnings (callers also call this, harmless to repeat).
 gdal.UseExceptions()
 
@@ -265,7 +267,7 @@ def _mosaic_tiles(tile_files, output_file, crop_extent=None):
         os.remove(vrt_file)
 
 
-def _clip_to_vector(input_file, output_file, vector_path, buff=0.0, nodata=255):
+def _clip_to_vector(input_file, output_file, vector_path, buff=0.0, nodata=NODATA_BYTE):
     """Clip a raster to a vector polygon boundary.
 
     Unified superset of the two former copies:

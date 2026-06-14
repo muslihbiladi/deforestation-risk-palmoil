@@ -11,6 +11,7 @@ if TYPE_CHECKING:
     from palmdef_risk.io.run import RunContext
 
 from palmdef_risk.io.helpers import raster_shape as _raster_shape
+from palmdef_risk.constants import NODATA_FLOAT
 
 logger = logging.getLogger(__name__)
 
@@ -83,7 +84,7 @@ def _apply_gaussian_filter(
     out_ds.SetGeoTransform(gt)
     out_ds.SetProjection(proj)
     out_ds.GetRasterBand(1).WriteArray(result)
-    out_ds.GetRasterBand(1).SetNoDataValue(-9999.0)
+    out_ds.GetRasterBand(1).SetNoDataValue(NODATA_FLOAT)
     out_ds.FlushCache()
     out_ds = None
 
@@ -139,7 +140,7 @@ def orthogonalize_gravity(
         )
 
     ny, nx = shape
-    resid_arr = np.full(shape, -9999.0, dtype=np.float32)
+    resid_arr = np.full(shape, NODATA_FLOAT, dtype=np.float32)
     resid_arr[mask] = residual_flat.astype(np.float32)
 
     out_ds = gdal.GetDriverByName("GTiff").Create(
@@ -149,7 +150,7 @@ def orthogonalize_gravity(
     out_ds.SetGeoTransform(gt)
     out_ds.SetProjection(proj)
     out_ds.GetRasterBand(1).WriteArray(resid_arr)
-    out_ds.GetRasterBand(1).SetNoDataValue(-9999.0)
+    out_ds.GetRasterBand(1).SetNoDataValue(NODATA_FLOAT)
     out_ds.FlushCache()
     out_ds = None
     logger.info("Gravity orthogonalized R²=%.3f; residual → %s", r2, out_path)
@@ -206,7 +207,7 @@ def _rasterize_points_numpy(points_gpkg: Path, ref_path: Path, out_path: Path) -
     out_ds.SetGeoTransform(gt)
     out_ds.SetProjection(proj)
     out_ds.GetRasterBand(1).WriteArray(arr)
-    out_ds.GetRasterBand(1).SetNoDataValue(-9999.0)
+    out_ds.GetRasterBand(1).SetNoDataValue(NODATA_FLOAT)
     out_ds.FlushCache()
     out_ds = None
     return n_burned

@@ -9,6 +9,7 @@ import numpy as np
 import pandas as pd
 
 from palmdef_risk.parallel import run_parallel
+from palmdef_risk.constants import NODATA_FLOAT
 
 if TYPE_CHECKING:
     from palmdef_risk.io.run import RunContext
@@ -80,14 +81,14 @@ def _create_log_dist_rasters(data_dir: Path, formula: str) -> None:
         out_ds.SetGeoTransform(ds.GetGeoTransform())
         out_ds.SetProjection(ds.GetProjection())
         out_band = out_ds.GetRasterBand(1)
-        out_band.SetNoDataValue(-9999.0)
+        out_band.SetNoDataValue(NODATA_FLOAT)
 
         for yoff in range(0, ny, by):
             ywin = min(by, ny - yoff)
             for xoff in range(0, nx, bx):
                 xwin = min(bx, nx - xoff)
                 blk = band.ReadAsArray(xoff, yoff, xwin, ywin).astype(np.float32)
-                out_blk = np.full((ywin, xwin), -9999.0, dtype=np.float32)
+                out_blk = np.full((ywin, xwin), NODATA_FLOAT, dtype=np.float32)
                 valid = (blk != nodata) if nodata is not None else np.ones_like(blk, dtype=bool)
                 out_blk[valid] = np.log(blk[valid] + 1)
                 out_band.WriteArray(out_blk, xoff, yoff)
@@ -159,7 +160,7 @@ def _create_hgu_spline_rasters(data_dir: Path, formula: str, sample_path: Path) 
         out_ds.SetGeoTransform(gt)
         out_ds.SetProjection(proj)
         ob = out_ds.GetRasterBand(1)
-        ob.SetNoDataValue(-9999.0)
+        ob.SetNoDataValue(NODATA_FLOAT)
         out_bands[name] = (out_ds, ob, min(i, n_basis - 1))
 
     for yoff in range(0, ny, by):
@@ -174,7 +175,7 @@ def _create_hgu_spline_rasters(data_dir: Path, formula: str, sample_path: Path) 
                     build_design_matrices([design_info], {"x": blk[valid].ravel()})[0]
                 )
             for _, ob, col_idx in out_bands.values():
-                out_blk = np.full((ywin, xwin), -9999.0, dtype=np.float32)
+                out_blk = np.full((ywin, xwin), NODATA_FLOAT, dtype=np.float32)
                 if basis is not None:
                     out_blk[valid] = basis[:, col_idx].astype(np.float32)
                 ob.WriteArray(out_blk, xoff, yoff)

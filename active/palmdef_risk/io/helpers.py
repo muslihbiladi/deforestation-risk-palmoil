@@ -17,6 +17,8 @@ import numpy as np
 from osgeo import gdal, ogr, osr, gdalconst
 from pathlib import Path
 
+from palmdef_risk.constants import NODATA_BYTE, NODATA_FLOAT
+
 
 # ============================================================
 # AOI UTILITIES
@@ -475,7 +477,7 @@ def reproject_vector(input_path, output_path, target_srs):
 # ============================================================
 
 def rasterize_vector(vector_path, output_path, burn_value,
-                     mask_props, nodata_value=255):
+                     mask_props, nodata_value=NODATA_BYTE):
     """Rasterize a vector file to match the reference raster grid.
 
     Args:
@@ -567,7 +569,7 @@ def _stamp_reference_nodata(raster_path, ref_path, nodata_value, as_float):
     ref_ds = None
 
 
-def apply_mask(raster_path, ref_path, nodata_value=255):
+def apply_mask(raster_path, ref_path, nodata_value=NODATA_BYTE):
     """Apply study-area mask to a Byte raster — set NoData outside study area.
 
     Streams the reference NoData footprint block-by-block (see
@@ -582,7 +584,7 @@ def apply_mask(raster_path, ref_path, nodata_value=255):
     _stamp_reference_nodata(raster_path, ref_path, nodata_value, as_float=False)
 
 
-def apply_mask_float(raster_path, ref_path, nodata_value=-9999):
+def apply_mask_float(raster_path, ref_path, nodata_value=NODATA_FLOAT):
     """Apply study-area mask to a float raster (e.g. DEM, slope).
 
     Streams the reference NoData footprint block-by-block (see

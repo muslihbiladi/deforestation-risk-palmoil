@@ -56,6 +56,7 @@ from palmdef_risk.data._ee_utils import (
     _mosaic_tiles,
     _clip_to_vector,
 )
+from palmdef_risk.constants import NODATA_BYTE
 
 # Suppress GDAL warnings
 gdal.UseExceptions()
@@ -210,7 +211,7 @@ def export_bands(input_file, output_dir=None, prefix="forest_t",
     output_files = []
     for b in range(1, n_bands + 1):
         nd = ds.GetRasterBand(b).GetNoDataValue()
-        nodata_val = int(nd) if nd is not None else 255
+        nodata_val = int(nd) if nd is not None else NODATA_BYTE
         out_path = os.path.join(output_dir, f"{prefix}{b}.tif")
 
         gdal.Translate(
@@ -297,7 +298,7 @@ def export_period_fcc(input_file, output_dir=None, verbose=True):
         )
         out_ds.SetGeoTransform(gt)
         out_ds.SetProjection(proj)
-        out_ds.GetRasterBand(1).SetNoDataValue(255)
+        out_ds.GetRasterBand(1).SetNoDataValue(NODATA_BYTE)
         out_dss.append(out_ds)
         output_files.append(out_path)
 
@@ -314,8 +315,8 @@ def export_period_fcc(input_file, output_dir=None, verbose=True):
                 # fcc_ij: 1 if forest at both ti and tj, 0 if deforested.
                 # Pixels not forest at ti are outside the analysis domain → NoData.
                 fcc = (blocks[i].astype(np.uint8) & blocks[i + 1].astype(np.uint8))
-                fcc[blocks[i] == 0] = 255
-                fcc[nodata_mask] = 255
+                fcc[blocks[i] == 0] = NODATA_BYTE
+                fcc[nodata_mask] = NODATA_BYTE
                 out_dss[i].GetRasterBand(1).WriteArray(fcc, xoff, yoff)
 
     for i, out_ds in enumerate(out_dss):
@@ -377,7 +378,7 @@ def sum_raster_bands(input_file, output_file, verbose=True):
     ds = None
 
     # Set NoData pixels to 255 in the output
-    band_sum[nodata_mask] = 255
+    band_sum[nodata_mask] = NODATA_BYTE
 
     # Write output
     driver = gdal.GetDriverByName("GTiff")
@@ -440,7 +441,7 @@ def reproject_raster(input_file, output_file, dst_crs="EPSG:32750",
 
     # Forest cover data uses 255 as NoData; fall back to it if source has none
     if src_nodata is None:
-        src_nodata = 255
+        src_nodata = NODATA_BYTE
 
     warp_options = gdal.WarpOptions(
         format="GTiff",
@@ -491,7 +492,7 @@ def reproject_all(file_list, output_dir=None, dst_crs="EPSG:32750",
     return output_files
 
 
-def _set_nodata(file_path, nodata=255):
+def _set_nodata(file_path, nodata=NODATA_BYTE):
     """Set NoData value on all bands of a raster in-place."""
     ds = gdal.Open(file_path, gdal.GA_Update)
     if ds is not None:
@@ -690,7 +691,7 @@ def get_fcc(
 
         # Set NoData=255 on the mosaicked output so reprojection
         # fills outside-extent areas with 255 instead of 0
-        _set_nodata(output_file, nodata=255)
+        _set_nodata(output_file, nodata=NODATA_BYTE)
 
     # ---- Cleanup tile files ----
     for f in tile_files:
