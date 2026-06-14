@@ -191,7 +191,7 @@ def align_all(ctx: RunContext, inputs: dict | None = None, force: bool = False) 
             if not _skip(out):
                 reproject_raster_to_match(str(raw_path), str(out), mask_props,
                                           resample_alg="bilinear")
-                apply_mask_float(str(out), mask_props["invalid_mask"])
+                apply_mask_float(str(out), mask_props["ref_path"])
                 if name == "altitude":
                     _remap_srtm_voids(str(out))
             result[name] = out
@@ -208,7 +208,7 @@ def align_all(ctx: RunContext, inputs: dict | None = None, force: bool = False) 
                 proj_vec = ctx.data_dir / "intermediate" / f"{name}_proj.gpkg"
                 vec_to_burn = reproject_vector(str(vec_path), str(proj_vec), mask_props["srs"])
                 rasterize_vector(str(vec_to_burn), str(out), burn, mask_props)
-                apply_mask(str(out), mask_props["invalid_mask"])
+                apply_mask(str(out), mask_props["ref_path"])
             result[name] = out
 
     # 4. Peatland — branch on type
@@ -220,11 +220,11 @@ def align_all(ctx: RunContext, inputs: dict | None = None, force: bool = False) 
                 proj_peat = ctx.data_dir / "intermediate" / "peatland_proj.gpkg"
                 peat_to_burn = reproject_vector(str(peat_src), str(proj_peat), mask_props["srs"])
                 rasterize_vector(str(peat_to_burn), str(out), 1, mask_props)
-                apply_mask(str(out), mask_props["invalid_mask"])
+                apply_mask(str(out), mask_props["ref_path"])
             else:
                 reproject_raster_to_match(str(peat_src), str(out), mask_props,
                                           resample_alg="bilinear")
-                apply_mask_float(str(out), mask_props["invalid_mask"])
+                apply_mask_float(str(out), mask_props["ref_path"])
         result["peatland"] = out
 
     # 5. HGU signed-distance raster
@@ -257,7 +257,7 @@ def align_all(ctx: RunContext, inputs: dict | None = None, force: bool = False) 
             reproject_raster_to_match(str(merged), str(out), mask_props,
                                       resample_alg="near",
                                       output_dtype=gdalconst.GDT_Byte)
-            apply_mask(str(out), mask_props["invalid_mask"])
+            apply_mask(str(out), mask_props["ref_path"])
         result[res_key] = out
 
     # 7. Mill — rasterize presence raster
@@ -268,7 +268,7 @@ def align_all(ctx: RunContext, inputs: dict | None = None, force: bool = False) 
             proj_mill = ctx.data_dir / "intermediate" / "mill_proj.gpkg"
             mill_to_burn = reproject_vector(str(mill_gpkg), str(proj_mill), mask_props["srs"])
             rasterize_vector(str(mill_to_burn), str(out), 1, mask_props)
-            apply_mask(str(out), mask_props["invalid_mask"])
+            apply_mask(str(out), mask_props["ref_path"])
         result["mill"] = out
 
     return result
