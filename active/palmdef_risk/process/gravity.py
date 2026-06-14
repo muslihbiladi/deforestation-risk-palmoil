@@ -11,7 +11,7 @@ if TYPE_CHECKING:
     from palmdef_risk.io.run import RunContext
 
 from palmdef_risk.io.helpers import raster_shape as _raster_shape
-from palmdef_risk.constants import NODATA_FLOAT
+from palmdef_risk.constants import NODATA_FLOAT, GTIFF_OPTS
 
 logger = logging.getLogger(__name__)
 
@@ -79,7 +79,7 @@ def _apply_gaussian_filter(
     )
     out_ds = gdal.GetDriverByName("GTiff").Create(
         str(out_path), nx, ny, 1, gdal.GDT_Float32,
-        options=["COMPRESS=LZW", "TILED=YES"],
+        options=GTIFF_OPTS,
     )
     out_ds.SetGeoTransform(gt)
     out_ds.SetProjection(proj)
@@ -145,7 +145,7 @@ def orthogonalize_gravity(
 
     out_ds = gdal.GetDriverByName("GTiff").Create(
         str(out_path), nx, ny, 1, gdal.GDT_Float32,
-        options=["COMPRESS=LZW", "TILED=YES"],
+        options=GTIFF_OPTS,
     )
     out_ds.SetGeoTransform(gt)
     out_ds.SetProjection(proj)
@@ -202,7 +202,7 @@ def _rasterize_points_numpy(points_gpkg: Path, ref_path: Path, out_path: Path) -
 
     out_ds = gdal.GetDriverByName("GTiff").Create(
         str(out_path), nx, ny, 1, gdal.GDT_Float32,
-        options=["COMPRESS=LZW", "TILED=YES"],
+        options=GTIFF_OPTS,
     )
     out_ds.SetGeoTransform(gt)
     out_ds.SetProjection(proj)

@@ -27,7 +27,7 @@ from pathlib import Path
 import ee
 from osgeo import gdal, ogr, osr
 
-from palmdef_risk.constants import NODATA_BYTE
+from palmdef_risk.constants import NODATA_BYTE, GTIFF_OPTS
 
 # Suppress GDAL warnings (callers also call this, harmless to repeat).
 gdal.UseExceptions()
@@ -254,7 +254,7 @@ def _mosaic_tiles(tile_files, output_file, crop_extent=None):
     # Translate VRT to GeoTIFF (with optional crop)
     translate_options = {
         "format": "GTiff",
-        "creationOptions": ["COMPRESS=DEFLATE", "TILED=YES"],
+        "creationOptions": GTIFF_OPTS,
     }
     if crop_extent is not None:
         xmin, ymin, xmax, ymax = crop_extent
@@ -338,7 +338,7 @@ def _clip_to_vector(input_file, output_file, vector_path, buff=0.0, nodata=NODAT
         cutlineDSName=cutline_path,
         cutlineLayer=cutline_layer,
         cropToCutline=True,
-        creationOptions=["COMPRESS=DEFLATE", "TILED=YES"],
+        creationOptions=GTIFF_OPTS,
         dstNodata=nodata,
     )
     # Tell GDAL the CRS of the cutline so it can reproject it if needed.

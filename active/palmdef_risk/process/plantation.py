@@ -9,7 +9,7 @@ from osgeo import gdal
 if TYPE_CHECKING:
     from palmdef_risk.io.run import RunContext
 
-from palmdef_risk.constants import NODATA_FLOAT
+from palmdef_risk.constants import NODATA_FLOAT, GTIFF_OPTS
 
 logger = logging.getLogger(__name__)
 
@@ -70,7 +70,7 @@ def orthogonalize_plantation(
 
     out_ds = gdal.GetDriverByName("GTiff").Create(
         str(out_path), nx, ny, 1, gdal.GDT_Float32,
-        options=["COMPRESS=LZW", "TILED=YES"],
+        options=GTIFF_OPTS,
     )
     out_ds.SetGeoTransform(gt)
     out_ds.SetProjection(proj)

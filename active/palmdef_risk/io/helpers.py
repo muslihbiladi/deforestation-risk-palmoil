@@ -17,7 +17,7 @@ import numpy as np
 from osgeo import gdal, ogr, osr, gdalconst
 from pathlib import Path
 
-from palmdef_risk.constants import NODATA_BYTE, NODATA_FLOAT
+from palmdef_risk.constants import NODATA_BYTE, NODATA_FLOAT, GTIFF_OPTS
 
 
 # ============================================================
@@ -221,7 +221,7 @@ def reproject_raster(input_file, output_file, target_crs,
         "resampleAlg": resample_alg,
         "format": "GTiff",
         "outputType": dtype,
-        "creationOptions": ["COMPRESS=LZW", "TILED=YES", "BIGTIFF=IF_SAFER"],
+        "creationOptions": GTIFF_OPTS + ["BIGTIFF=IF_SAFER"],
     }
 
     if nodata is not None:
@@ -281,7 +281,7 @@ def reproject_raster_to_match(input_file, output_file, mask_props,
         "resampleAlg": resample_alg,
         "format": "GTiff",
         "outputType": output_dtype if output_dtype is not None else gdalconst.GDT_Float32,
-        "creationOptions": ["COMPRESS=LZW", "TILED=YES"],
+        "creationOptions": GTIFF_OPTS,
     }
 
     if nodata is not None:
@@ -495,7 +495,7 @@ def rasterize_vector(vector_path, output_path, burn_value,
     out_ds = driver.Create(
         output_path, mask_props["xsize"], mask_props["ysize"], 1,
         gdal.GDT_Byte,
-        options=["COMPRESS=LZW", "TILED=YES"],
+        options=GTIFF_OPTS,
     )
     out_ds.SetGeoTransform(mask_props["gt"])
     out_ds.SetProjection(mask_props["proj"])

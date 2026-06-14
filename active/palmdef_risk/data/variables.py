@@ -81,7 +81,7 @@ from palmdef_risk.data._ee_utils import (
     _mosaic_tiles,
     _clip_to_vector,
 )
-from palmdef_risk.constants import NODATA_BYTE, NODATA_FLOAT
+from palmdef_risk.constants import NODATA_BYTE, NODATA_FLOAT, GTIFF_OPTS
 
 gdal.UseExceptions()
 
@@ -293,7 +293,7 @@ def _reproject_raster(input_file, output_file, dst_crs,
         format="GTiff", dstSRS=dst_crs,
         resampleAlg=resample_map.get(resampling,
                                      gdal.GRA_NearestNeighbour),
-        creationOptions=["COMPRESS=DEFLATE", "TILED=YES"],
+        creationOptions=GTIFF_OPTS,
     )
     if nd is not None:
         opts["srcNodata"] = nd
@@ -408,7 +408,7 @@ def get_srtm(aoi, output_dir="data", buff=0.0, crop_to_aoi=True,
     # Band 1: altitude
     alt_path = os.path.join(output_dir, "altitude.tif")
     alt_ds = drv.Create(alt_path, nx, ny, 1, gdal.GDT_Int16,
-                        ["COMPRESS=DEFLATE", "TILED=YES"])
+                        GTIFF_OPTS)
     alt_ds.SetGeoTransform(gt)
     alt_ds.SetProjection(proj)
     alt_ds.GetRasterBand(1).WriteArray(ds.GetRasterBand(1).ReadAsArray())
@@ -420,7 +420,7 @@ def get_srtm(aoi, output_dir="data", buff=0.0, crop_to_aoi=True,
     # Band 2: slope
     slp_path = os.path.join(output_dir, "slope.tif")
     slp_ds = drv.Create(slp_path, nx, ny, 1, gdal.GDT_Float32,
-                        ["COMPRESS=DEFLATE", "TILED=YES"])
+                        GTIFF_OPTS)
     slp_ds.SetGeoTransform(gt)
     slp_ds.SetProjection(proj)
     slope_arr = ds.GetRasterBand(2).ReadAsArray().astype(np.float32)

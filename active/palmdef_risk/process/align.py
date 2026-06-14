@@ -17,7 +17,7 @@ from palmdef_risk.io.helpers import (
     reproject_vector, rasterize_vector, apply_mask, apply_mask_float,
     remove_if_exists, get_pixel_size_m, raster_shape as _raster_shape,
 )
-from palmdef_risk.constants import NODATA_BYTE, NODATA_FLOAT
+from palmdef_risk.constants import NODATA_BYTE, NODATA_FLOAT, GTIFF_OPTS
 
 log = logging.getLogger(__name__)
 
@@ -294,7 +294,7 @@ def merge_plantation(
     ny, nx = merged.shape
     driver = gdal.GetDriverByName("GTiff")
     out_ds = driver.Create(str(dst_path), nx, ny, 1, gdal.GDT_Byte,
-                           ["COMPRESS=DEFLATE", "TILED=YES"])
+                           GTIFF_OPTS)
     out_ds.SetGeoTransform(gt)
     out_ds.SetProjection(proj)
     out_ds.GetRasterBand(1).WriteArray(merged)
@@ -347,7 +347,7 @@ def compute_hgu_signed_distance(
     drv = gdal.GetDriverByName("GTiff")
     out_ds = drv.Create(
         str(out_tif), nx, ny, 1, gdal.GDT_Float32,
-        options=["COMPRESS=LZW", "TILED=YES"],
+        options=GTIFF_OPTS,
     )
     out_ds.SetGeoTransform(gt)
     out_ds.SetProjection(proj)

@@ -56,7 +56,7 @@ from palmdef_risk.data._ee_utils import (
     _mosaic_tiles,
     _clip_to_vector,
 )
-from palmdef_risk.constants import NODATA_BYTE
+from palmdef_risk.constants import NODATA_BYTE, GTIFF_OPTS
 
 # Suppress GDAL warnings
 gdal.UseExceptions()
@@ -221,7 +221,7 @@ def export_bands(input_file, output_dir=None, prefix="forest_t",
                 bandList=[b],
                 outputType=gdal.GDT_Byte,
                 noData=nodata_val,
-                creationOptions=["COMPRESS=DEFLATE", "TILED=YES"],
+                creationOptions=GTIFF_OPTS,
             ),
         )
 
@@ -294,7 +294,7 @@ def export_period_fcc(input_file, output_dir=None, verbose=True):
         out_path = os.path.join(output_dir, f"fcc{i + 1}{i + 2}.tif")
         out_ds = driver.Create(
             out_path, n_cols, n_rows, 1, gdal.GDT_Byte,
-            options=["COMPRESS=DEFLATE", "TILED=YES"],
+            options=GTIFF_OPTS,
         )
         out_ds.SetGeoTransform(gt)
         out_ds.SetProjection(proj)
@@ -384,7 +384,7 @@ def sum_raster_bands(input_file, output_file, verbose=True):
     driver = gdal.GetDriverByName("GTiff")
     out_ds = driver.Create(
         output_file, n_cols, n_rows, 1, gdal.GDT_Byte,
-        options=["COMPRESS=DEFLATE", "TILED=YES"],
+        options=GTIFF_OPTS,
     )
     out_ds.SetGeoTransform(gt)
     out_ds.SetProjection(proj)
@@ -447,7 +447,7 @@ def reproject_raster(input_file, output_file, dst_crs="EPSG:32750",
         format="GTiff",
         dstSRS=dst_crs,
         resampleAlg=resample_map[resampling],
-        creationOptions=["COMPRESS=DEFLATE", "TILED=YES"],
+        creationOptions=GTIFF_OPTS,
         srcNodata=src_nodata,
         dstNodata=src_nodata,
     )

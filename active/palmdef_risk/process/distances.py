@@ -10,7 +10,7 @@ if TYPE_CHECKING:
     from palmdef_risk.io.run import RunContext
 
 from palmdef_risk.io.helpers import raster_shape as _raster_shape
-from palmdef_risk.constants import NODATA_FLOAT
+from palmdef_risk.constants import NODATA_FLOAT, GTIFF_OPTS
 
 logger = logging.getLogger(__name__)
 
@@ -61,7 +61,7 @@ def _proximity_from_raster(src_path: Path, out_path: Path, target_value: int = 0
 
     out_ds = gdal.GetDriverByName("GTiff").Create(
         str(out_path), nx, ny, 1, gdal.GDT_Float32,
-        options=["COMPRESS=LZW", "TILED=YES"],
+        options=GTIFF_OPTS,
     )
     out_ds.SetGeoTransform(gt)
     out_ds.SetProjection(proj)
@@ -92,7 +92,7 @@ def _resample_to_ref(src: Path, ref: Path, out: Path) -> None:
             outputBounds=[xmin, ymin, xmax, ymax],
             width=nx, height=ny,
             resampleAlg=gdal.GRA_NearestNeighbour,
-            creationOptions=["COMPRESS=LZW", "TILED=YES"],
+            creationOptions=GTIFF_OPTS,
         ),
     )
 

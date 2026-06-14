@@ -9,7 +9,7 @@ import numpy as np
 import pandas as pd
 
 from palmdef_risk.parallel import run_parallel
-from palmdef_risk.constants import NODATA_FLOAT
+from palmdef_risk.constants import NODATA_FLOAT, GTIFF_OPTS
 
 if TYPE_CHECKING:
     from palmdef_risk.io.run import RunContext
@@ -76,7 +76,7 @@ def _create_log_dist_rasters(data_dir: Path, formula: str) -> None:
         drv = gdal.GetDriverByName("GTiff")
         out_ds = drv.Create(
             str(log_path), nx, ny, 1,
-            gdal.GDT_Float32, ["COMPRESS=LZW", "TILED=YES"],
+            gdal.GDT_Float32, GTIFF_OPTS,
         )
         out_ds.SetGeoTransform(ds.GetGeoTransform())
         out_ds.SetProjection(ds.GetProjection())
@@ -155,7 +155,7 @@ def _create_hgu_spline_rasters(data_dir: Path, formula: str, sample_path: Path) 
             continue
         out_ds = drv.Create(
             str(data_dir / f"{name}.tif"), nx, ny, 1, gdal.GDT_Float32,
-            ["COMPRESS=LZW", "TILED=YES"],
+            GTIFF_OPTS,
         )
         out_ds.SetGeoTransform(gt)
         out_ds.SetProjection(proj)
@@ -562,7 +562,7 @@ def _write_risk_raster(
 
     out_ds = gdal.GetDriverByName("GTiff").Create(
         out_tif, nx, ny, 1, gdal.GDT_UInt16,
-        options=["COMPRESS=LZW", "TILED=YES"],
+        options=GTIFF_OPTS,
     )
     out_ds.SetGeoTransform(gt)
     out_ds.SetProjection(proj)
