@@ -10,7 +10,26 @@ from scipy.signal import oaconvolve
 if TYPE_CHECKING:
     from palmdef_risk.io.run import RunContext
 
+from palmdef_risk.io.helpers import raster_shape as _raster_shape
+from palmdef_risk.constants import NODATA_FLOAT, GTIFF_OPTS
+
 logger = logging.getLogger(__name__)
+
+
+def _gaussian_kernel(sigma_px: float, radius_px: int) -> np.ndarray:
+    """Area-normalized circular Gaussian kernel, zeroed beyond radius_px.
+
+    Built in float32 so the downstream FFT convolution runs in float32
+    (complex64) rather than float64 — halving the peak memory of the gravity
+    surface. exp/normalize in [0, 1] are well within float32 precision.
+    """
+    offs = np.arange(-radius_px, radius_px + 1, dtype=np.float32)
+    yy, xx = np.meshgrid(offs, offs, indexing="ij")
+    d2 = xx ** 2 + yy ** 2  # squared pixel distance from kernel centre
+    kernel = np.exp(-d2 / (2.0 * np.float32(sigma_px) ** 2))
+    kernel[d2 > np.float32(radius_px) ** 2] = 0.0
+    kernel /= kernel.sum()  # area-normalize (matches prior DC-gain-1 FFT)
+    return kernel.astype(np.float32)
 
 
 def _apply_gaussian_filter(
@@ -36,7 +55,9 @@ def _apply_gaussian_filter(
     is removed.
     """
     ds = gdal.Open(str(mill_raster))
-    arr = ds.GetRasterBand(1).ReadAsArray().astype(np.float64)
+    # Read as float32 (mill density is 0/1) so oaconvolve runs in float32 —
+    # halves the peak RAM of the FFT versus the prior float64 upcast.
+    arr = ds.GetRasterBand(1).ReadAsArray().astype(np.float32)
     gt = ds.GetGeoTransform()
     proj = ds.GetProjection()
     pixel_size_m = abs(gt[1])
@@ -45,13 +66,8 @@ def _apply_gaussian_filter(
     sigma_px = (sigma_km * 1000.0) / pixel_size_m
     radius_px = int(np.ceil((radius_km * 1000.0) / pixel_size_m))
 
-    # Circular Gaussian kernel, zeroed beyond radius_px (the hard catchment).
-    offs = np.arange(-radius_px, radius_px + 1, dtype=np.float64)
-    yy, xx = np.meshgrid(offs, offs, indexing="ij")
-    d2 = xx ** 2 + yy ** 2  # squared pixel distance from kernel centre
-    kernel = np.exp(-d2 / (2.0 * sigma_px ** 2))
-    kernel[d2 > radius_px ** 2] = 0.0
-    kernel /= kernel.sum()  # area-normalize (matches prior DC-gain-1 FFT)
+    # Circular Gaussian kernel (float32), zeroed beyond radius_px (hard catchment).
+    kernel = _gaussian_kernel(sigma_px, radius_px)
 
     ny, nx = arr.shape
     result = np.clip(oaconvolve(arr, kernel, mode="same"), 0.0, None).astype(np.float32)
@@ -63,12 +79,12 @@ def _apply_gaussian_filter(
     )
     out_ds = gdal.GetDriverByName("GTiff").Create(
         str(out_path), nx, ny, 1, gdal.GDT_Float32,
-        options=["COMPRESS=LZW", "TILED=YES"],
+        options=GTIFF_OPTS,
     )
     out_ds.SetGeoTransform(gt)
     out_ds.SetProjection(proj)
     out_ds.GetRasterBand(1).WriteArray(result)
-    out_ds.GetRasterBand(1).SetNoDataValue(-9999.0)
+    out_ds.GetRasterBand(1).SetNoDataValue(NODATA_FLOAT)
     out_ds.FlushCache()
     out_ds = None
 
@@ -98,15 +114,24 @@ def orthogonalize_gravity(
     g = g_arr[mask]
     r = r_arr[mask]
     t = t_arr[mask]
+    # Free the three full-raster float64 inputs as soon as the masked vectors are
+    # extracted — the OLS and residual-write phases use only the 1-D vectors, so
+    # otherwise these full arrays stay resident alongside X/g_hat/residual_flat
+    # and the output, roughly doubling peak RSS on full-AOI gravity rasters.
+    del g_arr, r_arr, t_arr
 
     X = np.column_stack([np.ones(len(g)), r, t])
+    del r, t  # values are now copied into X
     beta, *_ = np.linalg.lstsq(X, g, rcond=None)
     g_hat = X @ beta
+    del X
     residual_flat = g - g_hat
+    del g_hat
 
     ss_res = np.sum(residual_flat ** 2)
     ss_tot = np.sum((g - g.mean()) ** 2)
     r2 = 1.0 - ss_res / ss_tot if ss_tot > 0 else 0.0
+    del g
 
     if r2 > 0.85:
         logger.warning(
@@ -115,17 +140,17 @@ def orthogonalize_gravity(
         )
 
     ny, nx = shape
-    resid_arr = np.full(shape, -9999.0, dtype=np.float32)
+    resid_arr = np.full(shape, NODATA_FLOAT, dtype=np.float32)
     resid_arr[mask] = residual_flat.astype(np.float32)
 
     out_ds = gdal.GetDriverByName("GTiff").Create(
         str(out_path), nx, ny, 1, gdal.GDT_Float32,
-        options=["COMPRESS=LZW", "TILED=YES"],
+        options=GTIFF_OPTS,
     )
     out_ds.SetGeoTransform(gt)
     out_ds.SetProjection(proj)
     out_ds.GetRasterBand(1).WriteArray(resid_arr)
-    out_ds.GetRasterBand(1).SetNoDataValue(-9999.0)
+    out_ds.GetRasterBand(1).SetNoDataValue(NODATA_FLOAT)
     out_ds.FlushCache()
     out_ds = None
     logger.info("Gravity orthogonalized R²=%.3f; residual → %s", r2, out_path)
@@ -177,24 +202,15 @@ def _rasterize_points_numpy(points_gpkg: Path, ref_path: Path, out_path: Path) -
 
     out_ds = gdal.GetDriverByName("GTiff").Create(
         str(out_path), nx, ny, 1, gdal.GDT_Float32,
-        options=["COMPRESS=LZW", "TILED=YES"],
+        options=GTIFF_OPTS,
     )
     out_ds.SetGeoTransform(gt)
     out_ds.SetProjection(proj)
     out_ds.GetRasterBand(1).WriteArray(arr)
-    out_ds.GetRasterBand(1).SetNoDataValue(-9999.0)
+    out_ds.GetRasterBand(1).SetNoDataValue(NODATA_FLOAT)
     out_ds.FlushCache()
     out_ds = None
     return n_burned
-
-
-def _raster_shape(path: Path):
-    ds = gdal.Open(str(path))
-    if ds is None:
-        return None
-    shape = (ds.RasterYSize, ds.RasterXSize)
-    ds = None
-    return shape
 
 
 def _is_zero_raster(path: Path) -> bool:

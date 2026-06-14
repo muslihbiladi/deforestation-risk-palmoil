@@ -8,6 +8,9 @@ import pickle
 import numpy as np
 import pandas as pd
 
+from palmdef_risk.parallel import run_parallel
+from palmdef_risk.constants import NODATA_FLOAT, GTIFF_OPTS
+
 if TYPE_CHECKING:
     from palmdef_risk.io.run import RunContext
 
@@ -61,25 +64,35 @@ def _create_log_dist_rasters(data_dir: Path, formula: str) -> None:
             logger.warning("Source raster missing, cannot create %s", log_path.name)
             continue
 
+        # Stream the elementwise log transform over GDAL blocks: read → log →
+        # write per window so a full source + full result never coexist in RAM.
+        # Bit-identical to the prior full-array path (float32 in, log(x+1) out).
         ds = gdal.Open(str(src_path))
         band = ds.GetRasterBand(1)
         nodata = band.GetNoDataValue()
-        arr = band.ReadAsArray().astype(np.float32)
-
-        out_arr = np.full_like(arr, -9999.0)
-        valid = arr != nodata if nodata is not None else np.ones_like(arr, dtype=bool)
-        out_arr[valid] = np.log(arr[valid] + 1)
+        nx, ny = band.XSize, band.YSize
+        bx, by = band.GetBlockSize()
 
         drv = gdal.GetDriverByName("GTiff")
         out_ds = drv.Create(
-            str(log_path), ds.RasterXSize, ds.RasterYSize, 1,
-            gdal.GDT_Float32, ["COMPRESS=LZW", "TILED=YES"],
+            str(log_path), nx, ny, 1,
+            gdal.GDT_Float32, GTIFF_OPTS,
         )
         out_ds.SetGeoTransform(ds.GetGeoTransform())
         out_ds.SetProjection(ds.GetProjection())
         out_band = out_ds.GetRasterBand(1)
-        out_band.WriteArray(out_arr)
-        out_band.SetNoDataValue(-9999.0)
+        out_band.SetNoDataValue(NODATA_FLOAT)
+
+        for yoff in range(0, ny, by):
+            ywin = min(by, ny - yoff)
+            for xoff in range(0, nx, bx):
+                xwin = min(bx, nx - xoff)
+                blk = band.ReadAsArray(xoff, yoff, xwin, ywin).astype(np.float32)
+                out_blk = np.full((ywin, xwin), NODATA_FLOAT, dtype=np.float32)
+                valid = (blk != nodata) if nodata is not None else np.ones_like(blk, dtype=bool)
+                out_blk[valid] = np.log(blk[valid] + 1)
+                out_band.WriteArray(out_blk, xoff, yoff)
+
         out_band.FlushCache()
         out_ds = None
         ds = None
@@ -93,12 +106,14 @@ def _create_hgu_spline_rasters(data_dir: Path, formula: str, sample_path: Path) 
     during training must exist as raster files.  Only missing files are created.
 
     The cr() basis is rebuilt from the SAME training sample patsy memorized at fit
-    time (boundary + interior knots), then applied to the full raster via
-    build_design_matrices.  This guarantees the prediction basis matches the fitted
-    betas, and — because the memorized knots are reused — lets us evaluate the raster
-    in chunks without patsy re-deriving (and rejecting) knots per chunk.  Evaluating
-    all ~288M valid pixels in one dmatrix call allocates a ~10 GB (n_knots, N) temp
-    and OOMs; chunking caps the temp at a few hundred MB.
+    time (boundary + interior knots), then applied via build_design_matrices.  This
+    guarantees the prediction basis matches the fitted betas, and — because the
+    memorized knots are reused — lets us evaluate the raster in GDAL-block windows
+    without patsy re-deriving (and rejecting) knots per window.  cr() is a pure
+    per-pixel function of the memorized knots, so a windowed evaluation is bit-
+    identical to evaluating the whole raster at once, while never holding the full
+    source array, the full valid mask, or the full basis columns in RAM (evaluating
+    all ~288M valid pixels in one dmatrix call allocates a ~10 GB temp and OOMs).
     """
     if "hgu_b1" not in formula and "hgu_b2" not in formula:
         return
@@ -116,7 +131,7 @@ def _create_hgu_spline_rasters(data_dir: Path, formula: str, sample_path: Path) 
 
     # Recover the trained spline state: patsy cr() memorizes boundary knots from the
     # sample's data range during fit. Rebuilding from sample.csv reproduces exactly
-    # that state so build_design_matrices reuses it (no per-chunk knot re-derivation).
+    # that state so build_design_matrices reuses it (no per-window knot re-derivation).
     train_hgu = pd.read_csv(sample_path)["hgu_signed_dist"].to_numpy(dtype=np.float64)
     train_hgu = train_hgu[~np.isnan(train_hgu)]
     design_info = dmatrix(
@@ -127,52 +142,50 @@ def _create_hgu_spline_rasters(data_dir: Path, formula: str, sample_path: Path) 
     ds = gdal.Open(str(src_path))
     band = ds.GetRasterBand(1)
     nodata = band.GetNoDataValue()
-    arr = band.ReadAsArray().astype(np.float64)
     gt = ds.GetGeoTransform()
     proj = ds.GetProjection()
-    ny, nx = arr.shape
-    ds = None
+    nx, ny = band.XSize, band.YSize
+    bx, by = band.GetBlockSize()
 
-    valid = (arr != nodata) if nodata is not None else np.ones((ny, nx), dtype=bool)
-    x_valid = arr[valid].ravel()
-    del arr  # free full raster; valid mask is sufficient for scatter-write
-    n_valid = len(x_valid)
-
-    # Only hgu_b1/hgu_b2 (basis cols 0/1) feed the model — materialise just those,
-    # not all n_basis full-length columns. Apply the memorized basis in 5M-pixel
-    # chunks to avoid the ~10 GB monolithic temp.
-    want_idx = sorted({min(("hgu_b1", "hgu_b2").index(n), n_basis - 1) for n in needed})
-    _CHUNK = 5_000_000
-    dm_cols = {j: np.empty(n_valid, dtype=np.float32) for j in want_idx}
-    for start in range(0, n_valid, _CHUNK):
-        end = min(start + _CHUNK, n_valid)
-        chunk = np.asarray(
-            build_design_matrices([design_info], {"x": x_valid[start:end]})[0]
-        )
-        for j in want_idx:
-            dm_cols[j][start:end] = chunk[:, j].astype(np.float32)
-    del x_valid
-
+    # Create one output raster per needed basis column up front; write per window.
+    drv = gdal.GetDriverByName("GTiff")
+    out_bands = {}  # name -> (out_ds, out_band, basis_col_idx)
     for i, name in enumerate(("hgu_b1", "hgu_b2")):
         if name not in needed:
             continue
-        out_path = data_dir / f"{name}.tif"
-        col_idx = min(i, n_basis - 1)
-        out_arr = np.full((ny, nx), -9999.0, dtype=np.float32)
-        out_arr[valid] = dm_cols[col_idx]
-
-        out_ds = gdal.GetDriverByName("GTiff").Create(
-            str(out_path), nx, ny, 1, gdal.GDT_Float32,
-            ["COMPRESS=LZW", "TILED=YES"],
+        out_ds = drv.Create(
+            str(data_dir / f"{name}.tif"), nx, ny, 1, gdal.GDT_Float32,
+            GTIFF_OPTS,
         )
         out_ds.SetGeoTransform(gt)
         out_ds.SetProjection(proj)
-        out_band = out_ds.GetRasterBand(1)
-        out_band.WriteArray(out_arr)
-        out_band.SetNoDataValue(-9999.0)
-        out_band.FlushCache()
-        out_ds = None
-        logger.info("Created spline raster: %s", out_path.name)
+        ob = out_ds.GetRasterBand(1)
+        ob.SetNoDataValue(NODATA_FLOAT)
+        out_bands[name] = (out_ds, ob, min(i, n_basis - 1))
+
+    for yoff in range(0, ny, by):
+        ywin = min(by, ny - yoff)
+        for xoff in range(0, nx, bx):
+            xwin = min(bx, nx - xoff)
+            blk = band.ReadAsArray(xoff, yoff, xwin, ywin).astype(np.float64)
+            valid = (blk != nodata) if nodata is not None else np.ones_like(blk, dtype=bool)
+            basis = None
+            if valid.any():
+                basis = np.asarray(
+                    build_design_matrices([design_info], {"x": blk[valid].ravel()})[0]
+                )
+            for _, ob, col_idx in out_bands.values():
+                out_blk = np.full((ywin, xwin), NODATA_FLOAT, dtype=np.float32)
+                if basis is not None:
+                    out_blk[valid] = basis[:, col_idx].astype(np.float32)
+                ob.WriteArray(out_blk, xoff, yoff)
+
+    ds = None
+    for name, (out_ds, ob, _) in out_bands.items():
+        ob.FlushCache()
+        out_ds.FlushCache()
+        logger.info("Created spline raster: %s.tif", name)
+    out_bands.clear()
 
 
 def predict_risk(ctx: RunContext, model_path: Path, variant: str) -> Path:
@@ -185,23 +198,17 @@ def predict_risk(ctx: RunContext, model_path: Path, variant: str) -> Path:
     Returns path to risk_<variant>.tif.
     """
     import forestatrisk as far
-    from patsy import dmatrices
-    from palmdef_risk.model.icar import prepare_sample
+    from palmdef_risk.model.icar import load_design_matrix
 
     with open(model_path, "rb") as fh:
         state = pickle.load(fh)
 
     # Rebuild patsy DesignInfo from sample.csv (never pickle DesignInfo directly).
-    # Must dropna on scaled columns BEFORE dmatrices so scale() statistics match
-    # what fit_model used.  Any NaN row causes scale() to store NaN as its mean,
-    # which makes build_design_matrices return 0 rows at prediction time.
+    # dropna="scaled" drops NaN on the scale()-wrapped columns BEFORE dmatrices so
+    # scale() statistics match what fit_model used. Any NaN row would make scale()
+    # store NaN as its mean → build_design_matrices returns 0 rows at predict time.
     sample_path = ctx.output_dir / "sample.csv"
-    data = pd.read_csv(sample_path)
-    data = prepare_sample(data)
-    scaled_cols = re.findall(r"scale\((\w+)\)", state["formula"])
-    if scaled_cols:
-        data = data.dropna(subset=scaled_cols)
-    y, x = dmatrices(state["formula"], data, return_type="matrix")
+    _, y, x = load_design_matrix(ctx, variant, state["formula"], dropna="scaled")
 
     pred_mod = far.icarModelPred(
         formula=state["formula"],
@@ -214,14 +221,18 @@ def predict_risk(ctx: RunContext, model_path: Path, variant: str) -> Path:
     model_dir = model_path.parent
     rho_path = str(model_dir / "rho.tif")
 
-    # Interpolate posterior-mean rho (cell resolution) to 1 km
-    far.interpolate_rho(
-        rho=state["rho"],
-        input_raster=str(ctx.data_dir / "fcc23.tif"),
-        output_file=rho_path,
-        csize_orig=ctx.config.csize,
-        csize_new=1,
-    )
+    # Interpolate posterior-mean rho (cell resolution) to 1 km — skip if already
+    # done (resumability invariant; interpolate_rho is otherwise re-run on rerun).
+    if not Path(rho_path).exists():
+        far.interpolate_rho(
+            rho=state["rho"],
+            input_raster=str(ctx.data_dir / "fcc23.tif"),
+            output_file=rho_path,
+            csize_orig=ctx.config.csize,
+            csize_new=1,
+        )
+    else:
+        logger.info("rho.tif exists — skipping interpolate_rho")
 
     out_dir = ctx.output_dir / "predictions"
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -269,8 +280,7 @@ def predict_forecast(ctx: RunContext, model_path: Path, variant: str) -> Optiona
     var_dir lacks a required covariate raster.
     """
     import forestatrisk as far
-    from patsy import dmatrices
-    from palmdef_risk.model.icar import prepare_sample
+    from palmdef_risk.model.icar import load_design_matrix
 
     with open(model_path, "rb") as fh:
         state = pickle.load(fh)
@@ -286,12 +296,8 @@ def predict_forecast(ctx: RunContext, model_path: Path, variant: str) -> Optiona
 
     # Rebuild DesignInfo from sample.csv (never pickle DesignInfo).
     sample_path = ctx.output_dir / "sample.csv"
-    data = pd.read_csv(sample_path)
-    data = prepare_sample(data)
-    scaled_cols = re.findall(r"scale\((\w+)\)", state["formula"])
-    if scaled_cols:
-        data = data.dropna(subset=scaled_cols)
-    y, x = dmatrices(state["formula"], data, return_type="matrix")
+    _, y, x = load_design_matrix(ctx, variant, state["formula"], dropna="scaled")
+    scaled_cols = re.findall(r"scale\((\w+)\)", state["formula"])  # reused below
 
     pred_mod = far.icarModelPred(
         formula=state["formula"],
@@ -335,53 +341,129 @@ def predict_forecast(ctx: RunContext, model_path: Path, variant: str) -> Optiona
     return risk_path
 
 
-def predict_all(ctx: RunContext) -> list[Path]:
-    """Predict risk for all fitted model variants."""
-    from tqdm.auto import tqdm
-    results = []
-    variants = list(ctx.config.model_variants)
-    build_forecast_vardir(ctx)
-    for variant in tqdm(variants, desc="Predicting risk", unit="variant"):
+def _prewarm_derived_rasters(ctx: RunContext) -> None:
+    """Pre-create the shared derived covariate rasters (log-distance, HGU spline)
+    once, before the parallel pool, into both the t2 data dir and the forecast
+    dir. predict_risk / predict_forecast otherwise create these on demand into the
+    *shared* data dir; running variants concurrently would race two processes
+    writing the same log_dist_*.tif / hgu_b*.tif. Building them here (idempotent,
+    existence-guarded) makes every per-variant worker a no-op for these files.
+    """
+    sample_path = ctx.output_dir / "sample.csv"
+    fcast = ctx.data_dir / "forecast"
+    for variant in ctx.config.model_variants:
         model_path = ctx.output_dir / "models" / f"model_{variant}" / f"mod_{variant}.pkl"
         if not model_path.exists():
-            logger.warning("Model pkl not found, skipping variant %s: %s", variant, model_path)
             continue
-        risk_path = ctx.output_dir / "predictions" / f"risk_{variant}.tif"
-        if risk_path.exists():
-            logger.info("risk_%s.tif exists — skipping prediction", variant)
-            results.append(risk_path)
-        else:
-            try:
-                risk_path = predict_risk(ctx, model_path, variant)
-                results.append(risk_path)
-            except Exception:
-                import traceback
-                logger.error("Prediction failed for variant %s:\n%s", variant, traceback.format_exc())
-                continue
+        with open(model_path, "rb") as fh:
+            formula = pickle.load(fh)["formula"]
+        _create_log_dist_rasters(ctx.data_dir, formula)
+        _create_hgu_spline_rasters(ctx.data_dir, formula, sample_path)
+        if fcast.exists():
+            _create_log_dist_rasters(fcast, formula)
+            _create_hgu_spline_rasters(fcast, formula, sample_path)
+
+
+def _predict_one_variant(task: tuple) -> list[str]:
+    """Module-level worker: predict + project + forecast for one variant.
+
+    Mirrors the previous per-variant try/except/continue and skip-guards so a
+    single variant's failure is logged but does not abort the others — the
+    exception must not reach the pool (run_parallel would otherwise propagate it
+    and kill the run). Returns the output paths produced (as strings). The run
+    dir is reloaded into a RunContext (paths cross the pool, not live objects).
+    """
+    variant, run_dir, area_t2, area_t3 = task
+    from palmdef_risk.io.run import load_run
+    ctx = load_run(run_dir)
+    out: list[str] = []
+
+    model_path = ctx.output_dir / "models" / f"model_{variant}" / f"mod_{variant}.pkl"
+    if not model_path.exists():
+        logger.warning("Model pkl not found, skipping variant %s: %s", variant, model_path)
+        return out
+
+    risk_path = ctx.output_dir / "predictions" / f"risk_{variant}.tif"
+    if risk_path.exists():
+        logger.info("risk_%s.tif exists — skipping prediction", variant)
+        out.append(str(risk_path))
+    else:
         try:
-            future_path = project_future(ctx, risk_path, variant)
-            if future_path is not None:
-                results.append(future_path)
+            risk_path = predict_risk(ctx, model_path, variant)
+            out.append(str(risk_path))
         except Exception:
             import traceback
-            logger.error("Future projection failed for variant %s:\n%s", variant, traceback.format_exc())
-        # t3 forecast risk (decision deferred: does NOT yet feed project_future)
-        fc_path = ctx.output_dir / "predictions" / f"risk_{variant}_forecast.tif"
-        if fc_path.exists():
-            logger.info("risk_%s_forecast.tif exists — skipping forecast", variant)
-            results.append(fc_path)
-        else:
-            try:
-                fc = predict_forecast(ctx, model_path, variant)
-                if fc is not None:
-                    results.append(fc)
-            except Exception:
-                import traceback
-                logger.error("Forecast prediction failed for variant %s:\n%s", variant, traceback.format_exc())
+            logger.error("Prediction failed for variant %s:\n%s", variant, traceback.format_exc())
+            return out  # no risk raster → skip projection + forecast (was `continue`)
+
+    try:
+        future_path = project_future(ctx, risk_path, variant,
+                                     area_t2=area_t2, area_t3=area_t3)
+        if future_path is not None:
+            out.append(str(future_path))
+    except Exception:
+        import traceback
+        logger.error("Future projection failed for variant %s:\n%s", variant, traceback.format_exc())
+
+    # t3 forecast risk (decision deferred: does NOT yet feed project_future)
+    fc_path = ctx.output_dir / "predictions" / f"risk_{variant}_forecast.tif"
+    if fc_path.exists():
+        logger.info("risk_%s_forecast.tif exists — skipping forecast", variant)
+        out.append(str(fc_path))
+    else:
+        try:
+            fc = predict_forecast(ctx, model_path, variant)
+            if fc is not None:
+                out.append(str(fc))
+        except Exception:
+            import traceback
+            logger.error("Forecast prediction failed for variant %s:\n%s", variant, traceback.format_exc())
+    return out
+
+
+def predict_all(ctx: RunContext) -> list[Path]:
+    """Predict risk for all fitted model variants in parallel via run_parallel.
+
+    build_forecast_vardir and the shared derived rasters are prepared once
+    (variant-invariant); each variant is then predicted in its own process,
+    bounded by ram_per_predict_gb. Per-variant failures are isolated (logged,
+    others proceed), matching the previous sequential loop.
+    """
+    cfg = ctx.config
+    variants = list(cfg.model_variants)
+    build_forecast_vardir(ctx)
+    _prewarm_derived_rasters(ctx)
+
+    # Forest t2/t3 areas are variant-invariant — compute once here rather than
+    # once per variant inside project_future (countpix scans the full raster).
+    area_t2 = area_t3 = None
+    if cfg.project_future:
+        t2_path = ctx.data_dir / "forest_t2.tif"
+        t3_path = ctx.data_dir / "forest_t3.tif"
+        if t2_path.exists() and t3_path.exists():
+            import forestatrisk as far
+            area_t2 = far.countpix(input_raster=str(t2_path), value=1)["area"]
+            area_t3 = far.countpix(input_raster=str(t3_path), value=1)["area"]
+
+    tasks = [(v, str(ctx.run_dir), area_t2, area_t3) for v in variants]
+    nested = run_parallel(
+        _predict_one_variant, tasks,
+        ram_per_task_gb=cfg.ram_per_predict_gb, cfg=cfg,
+        desc="Predicting risk",
+    )
+    results: list[Path] = []
+    for paths in nested:
+        results.extend(Path(p) for p in (paths or []))
     return results
 
 
-def project_future(ctx: RunContext, risk_path: Path, variant: str) -> Optional[Path]:
+def project_future(
+    ctx: RunContext,
+    risk_path: Path,
+    variant: str,
+    area_t2: Optional[float] = None,
+    area_t3: Optional[float] = None,
+) -> Optional[Path]:
     """Project future forest cover by extrapolating the historical defor rate.
 
     Steps:
@@ -391,6 +473,10 @@ def project_future(ctx: RunContext, risk_path: Path, variant: str) -> Optional[P
       3. Target hectares to deforest = annual_ha × n_years.
       4. far.deforest selects the highest-risk pixels (by risk_<v>.tif) until
          that target hectarage is reached and writes a binary forest mask.
+
+    `area_t2`/`area_t3` (forest hectares at t2/t3) are variant-invariant; pass
+    them in to avoid recomputing far.countpix once per variant. When omitted
+    they are computed here (backward compatible).
 
     Writes <output_dir>/predictions/forest_future_<variant>.tif.
     Returns None when project_future is disabled or n_years ≤ 0.
@@ -415,8 +501,11 @@ def project_future(ctx: RunContext, risk_path: Path, variant: str) -> Optional[P
         return None
 
     # Historical annual deforestation rate (hectares/year) from t2 → t3.
-    area_t2 = far.countpix(input_raster=str(t2_path), value=1)["area"]
-    area_t3 = far.countpix(input_raster=str(t3_path), value=1)["area"]
+    # Areas are variant-invariant — reuse precomputed values when supplied.
+    if area_t2 is None:
+        area_t2 = far.countpix(input_raster=str(t2_path), value=1)["area"]
+    if area_t3 is None:
+        area_t3 = far.countpix(input_raster=str(t3_path), value=1)["area"]
     hist_span = years[-1] - years[-2]
     if hist_span <= 0:
         logger.warning("Invalid forest_years span (%s) — skipping projection", years)
@@ -473,7 +562,7 @@ def _write_risk_raster(
 
     out_ds = gdal.GetDriverByName("GTiff").Create(
         out_tif, nx, ny, 1, gdal.GDT_UInt16,
-        options=["COMPRESS=LZW", "TILED=YES"],
+        options=GTIFF_OPTS,
     )
     out_ds.SetGeoTransform(gt)
     out_ds.SetProjection(proj)

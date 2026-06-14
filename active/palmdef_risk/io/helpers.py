@@ -17,6 +17,8 @@ import numpy as np
 from osgeo import gdal, ogr, osr, gdalconst
 from pathlib import Path
 
+from palmdef_risk.constants import NODATA_BYTE, NODATA_FLOAT, GTIFF_OPTS
+
 
 # ============================================================
 # AOI UTILITIES
@@ -35,6 +37,20 @@ def aoi_bbox_4326(aoi_source: str) -> tuple:
     gdf_4326 = gdf.to_crs("EPSG:4326")
     xmin, ymin, xmax, ymax = gdf_4326.total_bounds
     return (xmin, ymin, xmax, ymax)
+
+
+def raster_shape(path):
+    """Return (rows, cols) for a raster, or None if it cannot be opened.
+
+    Single source for the shape-mismatch resumability checks in the process
+    stage (align / distances / gravity), which each used to define this locally.
+    """
+    ds = gdal.Open(str(path))
+    if ds is None:
+        return None
+    shape = (ds.RasterYSize, ds.RasterXSize)
+    ds = None
+    return shape
 
 
 # ============================================================
@@ -131,11 +147,17 @@ def print_raster_info(filepath):
 def get_mask_properties(mask_file):
     """Read all properties from a reference/mask raster.
 
+    Does NOT load the reference pixel array — the study-area NoData footprint
+    is applied later by apply_mask()/apply_mask_float(), which stream it
+    block-by-block straight from ``ref_path``. This keeps a single
+    full-reference boolean from being materialised and carried across every
+    masked layer in align_all (the dominant align-stage OOM source).
+
     Args:
         mask_file: Path to the reference raster.
 
     Returns:
-        dict with gt, proj, xsize, ysize, nodata, extent, srs, invalid_mask.
+        dict with gt, proj, xsize, ysize, nodata, extent, srs, ref_path.
     """
     ds = gdal.Open(mask_file)
     gt = ds.GetGeoTransform()
@@ -144,7 +166,6 @@ def get_mask_properties(mask_file):
     ysize = ds.RasterYSize
     band = ds.GetRasterBand(1)
     nodata = band.GetNoDataValue()
-    arr = band.ReadAsArray()
     ds = None
 
     xmin = gt[0]
@@ -155,10 +176,6 @@ def get_mask_properties(mask_file):
     srs = osr.SpatialReference()
     srs.ImportFromWkt(proj)
 
-    invalid_mask = (arr == nodata) if nodata is not None else np.zeros(
-        (ysize, xsize), dtype=bool
-    )
-
     return {
         "gt": gt,
         "proj": proj,
@@ -167,7 +184,7 @@ def get_mask_properties(mask_file):
         "nodata": nodata,
         "extent": (xmin, ymin, xmax, ymax),
         "srs": srs,
-        "invalid_mask": invalid_mask,
+        "ref_path": mask_file,
     }
 
 
@@ -204,7 +221,7 @@ def reproject_raster(input_file, output_file, target_crs,
         "resampleAlg": resample_alg,
         "format": "GTiff",
         "outputType": dtype,
-        "creationOptions": ["COMPRESS=LZW", "TILED=YES", "BIGTIFF=IF_SAFER"],
+        "creationOptions": GTIFF_OPTS + ["BIGTIFF=IF_SAFER"],
     }
 
     if nodata is not None:
@@ -264,7 +281,7 @@ def reproject_raster_to_match(input_file, output_file, mask_props,
         "resampleAlg": resample_alg,
         "format": "GTiff",
         "outputType": output_dtype if output_dtype is not None else gdalconst.GDT_Float32,
-        "creationOptions": ["COMPRESS=LZW", "TILED=YES"],
+        "creationOptions": GTIFF_OPTS,
     }
 
     if nodata is not None:
@@ -460,7 +477,7 @@ def reproject_vector(input_path, output_path, target_srs):
 # ============================================================
 
 def rasterize_vector(vector_path, output_path, burn_value,
-                     mask_props, nodata_value=255):
+                     mask_props, nodata_value=NODATA_BYTE):
     """Rasterize a vector file to match the reference raster grid.
 
     Args:
@@ -478,7 +495,7 @@ def rasterize_vector(vector_path, output_path, burn_value,
     out_ds = driver.Create(
         output_path, mask_props["xsize"], mask_props["ysize"], 1,
         gdal.GDT_Byte,
-        options=["COMPRESS=LZW", "TILED=YES"],
+        options=GTIFF_OPTS,
     )
     out_ds.SetGeoTransform(mask_props["gt"])
     out_ds.SetProjection(mask_props["proj"])
@@ -511,44 +528,75 @@ def rasterize_vector(vector_path, output_path, burn_value,
 # MASKING
 # ============================================================
 
-def apply_mask(raster_path, invalid_mask, nodata_value=255):
-    """Apply study area mask to a raster — set NoData outside study area.
+def _stamp_reference_nodata(raster_path, ref_path, nodata_value, as_float):
+    """Stamp ``nodata_value`` into ``raster_path`` wherever the reference raster
+    is NoData, streaming over GDAL blocks.
 
-    Args:
-        raster_path:  Path to raster file (modified in place).
-        invalid_mask: Boolean numpy array (True = outside study area).
-        nodata_value: NoData value to write.
+    Numerically identical to ``arr[ref == ref_nodata] = nodata_value`` on the
+    full arrays, but never holds the full reference or the full target in RAM:
+    peak is one block of each. ``raster_path`` and ``ref_path`` must share grid
+    dimensions (the align/distance pipeline guarantees this). The target's
+    NoData value is always (re)set, matching the prior full-array behaviour
+    even when the reference itself declares no NoData.
     """
-    ds = gdal.Open(raster_path, gdal.GA_Update)
+    ref_ds = gdal.Open(str(ref_path))
+    ref_band = ref_ds.GetRasterBand(1)
+    ref_nd = ref_band.GetNoDataValue()
+
+    ds = gdal.Open(str(raster_path), gdal.GA_Update)
     band = ds.GetRasterBand(1)
-    arr = band.ReadAsArray()
+    xsize, ysize = band.XSize, band.YSize
+    bx, by = band.GetBlockSize()
 
-    arr[invalid_mask] = nodata_value
+    if ref_nd is not None:
+        for yoff in range(0, ysize, by):
+            ywin = min(by, ysize - yoff)
+            for xoff in range(0, xsize, bx):
+                xwin = min(bx, xsize - xoff)
+                ref_blk = ref_band.ReadAsArray(xoff, yoff, xwin, ywin)
+                mask = ref_blk == ref_nd
+                if not mask.any():
+                    continue
+                blk = band.ReadAsArray(xoff, yoff, xwin, ywin)
+                if as_float:
+                    blk = blk.astype(np.float32)
+                blk[mask] = nodata_value
+                band.WriteArray(blk, xoff, yoff)
 
-    band.WriteArray(arr)
     band.SetNoDataValue(nodata_value)
     ds.FlushCache()
     ds = None
+    ref_ds = None
 
 
-def apply_mask_float(raster_path, invalid_mask, nodata_value=-9999):
-    """Apply study area mask to a float raster (e.g. DEM, slope).
+def apply_mask(raster_path, ref_path, nodata_value=NODATA_BYTE):
+    """Apply study-area mask to a Byte raster — set NoData outside study area.
+
+    Streams the reference NoData footprint block-by-block (see
+    _stamp_reference_nodata) instead of carrying a full-reference boolean.
 
     Args:
         raster_path:  Path to raster file (modified in place).
-        invalid_mask: Boolean numpy array (True = outside study area).
+        ref_path:     Path to the reference raster whose NoData footprint
+                      defines the study area.
         nodata_value: NoData value to write.
     """
-    ds = gdal.Open(raster_path, gdal.GA_Update)
-    band = ds.GetRasterBand(1)
-    arr = band.ReadAsArray().astype(np.float32)
+    _stamp_reference_nodata(raster_path, ref_path, nodata_value, as_float=False)
 
-    arr[invalid_mask] = nodata_value
 
-    band.WriteArray(arr)
-    band.SetNoDataValue(nodata_value)
-    ds.FlushCache()
-    ds = None
+def apply_mask_float(raster_path, ref_path, nodata_value=NODATA_FLOAT):
+    """Apply study-area mask to a float raster (e.g. DEM, slope).
+
+    Streams the reference NoData footprint block-by-block (see
+    _stamp_reference_nodata) instead of carrying a full-reference boolean.
+
+    Args:
+        raster_path:  Path to raster file (modified in place).
+        ref_path:     Path to the reference raster whose NoData footprint
+                      defines the study area.
+        nodata_value: NoData value to write.
+    """
+    _stamp_reference_nodata(raster_path, ref_path, nodata_value, as_float=True)
 
 
 # ============================================================

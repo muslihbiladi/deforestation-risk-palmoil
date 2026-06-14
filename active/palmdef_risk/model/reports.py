@@ -23,23 +23,26 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+# (output_dir, variant) → (p_hat, y_obs, beta_names). The three per-variant
+# exporters each call _predict_in_sample, so without this each run rebuilt the
+# patsy design matrices 3x per variant (9x total). The result is deterministic
+# per (run output dir, variant) — sample.csv and the fitted state are fixed
+# within a run — so caching is safe.
+_IN_SAMPLE_CACHE: dict[tuple[str, str], tuple[np.ndarray, np.ndarray, list[str]]] = {}
+
 
 def _predict_in_sample(
     ctx: "RunContext", state: dict, variant: str
 ) -> tuple[np.ndarray, np.ndarray, list[str]]:
     """Return (p_hat, y_obs, beta_names) for variant's training subset."""
-    from patsy import dmatrices
-    from palmdef_risk.model.icar import prepare_sample, _LOG_DIST_COLS, variant_extra_cols
+    from palmdef_risk.model.icar import load_design_matrix
 
-    data = pd.read_csv(ctx.output_dir / "sample.csv")
-    data = prepare_sample(data)
-    base_cols = ["fcc23", "altitude", "slope", "protected", "cell"] + [
-        f"log_{c}" for c in _LOG_DIST_COLS
-    ]
-    extra_cols = variant_extra_cols(variant)
-    data = data.dropna(subset=base_cols + extra_cols)
+    cache_key = (str(ctx.output_dir), variant)
+    cached = _IN_SAMPLE_CACHE.get(cache_key)
+    if cached is not None:
+        return cached
 
-    y, x = dmatrices(state["formula"], data, return_type="matrix")
+    data, y, x = load_design_matrix(ctx, variant, state["formula"], dropna="base")
     x_arr = np.asarray(x)
     y_arr = np.asarray(y)
     col_names = list(x.design_info.column_names)
@@ -53,7 +56,9 @@ def _predict_in_sample(
     eta = x_fixed @ betas + rho[cell_idx]
     p_hat = np.clip(1.0 / (1.0 + np.exp(-eta)), 1e-12, 1.0 - 1e-12)
     y_obs = y_arr[:, 0].astype(int)
-    return p_hat, y_obs, beta_names
+    result = (p_hat, y_obs, beta_names)
+    _IN_SAMPLE_CACHE[cache_key] = result
+    return result
 
 
 def _load_state(ctx: "RunContext", variant: str) -> Optional[dict]:

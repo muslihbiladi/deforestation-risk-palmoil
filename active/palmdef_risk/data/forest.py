@@ -39,6 +39,7 @@ import os
 import io
 import math
 import time
+import logging
 import multiprocessing
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
@@ -46,6 +47,19 @@ from pathlib import Path
 import ee
 import numpy as np
 from osgeo import gdal, ogr, osr
+
+from palmdef_risk.data._ee_utils import (
+    _get_extent_from_vector,
+    _parse_aoi,
+    _snap_extent,
+    _make_grid,
+    _download_tile,
+    _mosaic_tiles,
+    _clip_to_vector,
+)
+from palmdef_risk.constants import NODATA_BYTE, GTIFF_OPTS
+
+logger = logging.getLogger(__name__)
 
 # Suppress GDAL warnings
 gdal.UseExceptions()
@@ -63,127 +77,9 @@ MAX_TILE_PIXELS = 12_000_000  # conservative: ~3500x3500
 
 
 # ============================================================
-# AOI parsing
+# Grid saving
+# (AOI parsing, snapping, and tiling now live in data/_ee_utils.py)
 # ============================================================
-
-def _get_extent_from_vector(vector_path):
-    """Get bounding box from a vector file in EPSG:4326.
-
-    :param vector_path: Path to GPKG, SHP, or GeoJSON file.
-    :return: Tuple (xmin, ymin, xmax, ymax) in EPSG:4326.
-    """
-    ds = ogr.Open(str(vector_path))
-    if ds is None:
-        raise FileNotFoundError(
-            f"Cannot open vector file: {vector_path}"
-        )
-    layer = ds.GetLayer()
-    srs_src = layer.GetSpatialRef()
-
-    # Get extent in source CRS
-    xmin, xmax, ymin, ymax = layer.GetExtent()
-
-    # Transform to EPSG:4326 if needed
-    srs_4326 = osr.SpatialReference()
-    srs_4326.ImportFromEPSG(4326)
-    srs_4326.SetAxisMappingStrategy(osr.OAMS_TRADITIONAL_GIS_ORDER)
-
-    if srs_src is not None:
-        srs_src.SetAxisMappingStrategy(osr.OAMS_TRADITIONAL_GIS_ORDER)
-        if not srs_src.IsSame(srs_4326):
-            transform = osr.CoordinateTransformation(srs_src, srs_4326)
-            # Transform all four corners and take envelope
-            corners = [
-                (xmin, ymin), (xmin, ymax),
-                (xmax, ymin), (xmax, ymax),
-            ]
-            xs, ys = [], []
-            for cx, cy in corners:
-                tx, ty, _ = transform.TransformPoint(cx, cy)
-                xs.append(tx)
-                ys.append(ty)
-            xmin, ymin = min(xs), min(ys)
-            xmax, ymax = max(xs), max(ys)
-
-    ds = None
-    return (xmin, ymin, xmax, ymax)
-
-
-def _parse_aoi(aoi, buff=0.0):
-    """Parse AOI into (xmin, ymin, xmax, ymax) with optional buffer.
-
-    :param aoi: Tuple (xmin, ymin, xmax, ymax) or path to vector file.
-    :param buff: Buffer in degrees.
-    :return: Tuple (xmin, ymin, xmax, ymax).
-    """
-    if isinstance(aoi, (tuple, list)) and len(aoi) == 4:
-        xmin, ymin, xmax, ymax = aoi
-    elif isinstance(aoi, (str, Path)):
-        xmin, ymin, xmax, ymax = _get_extent_from_vector(aoi)
-    else:
-        raise ValueError(
-            "aoi must be a (xmin, ymin, xmax, ymax) tuple "
-            "or a path to a vector file."
-        )
-
-    # Apply buffer
-    xmin -= buff
-    ymin -= buff
-    xmax += buff
-    ymax += buff
-
-    return (xmin, ymin, xmax, ymax)
-
-
-# ============================================================
-# Grid snapping and tiling
-# ============================================================
-
-def _snap_extent(extent, scale=SCALE):
-    """Snap extent to the global pixel grid.
-
-    This ensures all tiles share the same pixel origin, preventing
-    misalignment during mosaicking.
-
-    :param extent: Tuple (xmin, ymin, xmax, ymax).
-    :param scale: Pixel size in degrees.
-    :return: Snapped (xmin, ymin, xmax, ymax).
-    """
-    xmin, ymin, xmax, ymax = extent
-    xmin_s = math.floor(xmin / scale) * scale
-    ymin_s = math.floor(ymin / scale) * scale
-    xmax_s = math.ceil(xmax / scale) * scale
-    ymax_s = math.ceil(ymax / scale) * scale
-    return (xmin_s, ymin_s, xmax_s, ymax_s)
-
-
-def _make_grid(extent, tile_size=0.5, scale=SCALE):
-    """Create a grid of tile extents, all snapped to the pixel grid.
-
-    :param extent: Tuple (xmin, ymin, xmax, ymax) - already snapped.
-    :param tile_size: Approximate tile size in degrees.
-    :param scale: Pixel size in degrees.
-    :return: List of (xmin, ymin, xmax, ymax) tuples.
-    """
-    xmin, ymin, xmax, ymax = extent
-
-    # Snap tile_size to whole number of pixels
-    tile_pixels = round(tile_size / scale)
-    tile_size_snapped = tile_pixels * scale
-
-    tiles = []
-    y = ymin
-    while y < ymax:
-        x = xmin
-        y_top = min(y + tile_size_snapped, ymax)
-        while x < xmax:
-            x_right = min(x + tile_size_snapped, xmax)
-            tiles.append((x, y, x_right, y_top))
-            x = x_right
-        y = y_top
-
-    return tiles
-
 
 def _save_grid_to_gpkg(tiles, output_file):
     """Save tile grid as GeoPackage for reference/debugging.
@@ -285,212 +181,8 @@ def ee_gfc(years, perc=75):
 
 
 # ============================================================
-# Tile downloading with computePixels
-# ============================================================
-
-def _download_tile(args):
-    """Download one tile using ee.data.computePixels.
-
-    This method requests an exact pixel grid from EE, ensuring
-    perfect alignment between adjacent tiles.
-
-    :param args: Tuple of (tile_extent, forest_img, tile_index,
-        output_dir, verbose, n_bands, max_retries).
-    :return: Path to the output tile file, or None on failure.
-    """
-    (tile_extent, forest_img, tile_index, output_dir,
-     verbose, n_bands, max_retries) = args
-    xmin, ymin, xmax, ymax = tile_extent
-    tile_file = os.path.join(output_dir, f"tile_{tile_index:04d}.tif")
-
-    # Calculate exact pixel dimensions
-    n_cols = round((xmax - xmin) / SCALE)
-    n_rows = round((ymax - ymin) / SCALE)
-
-    if n_cols == 0 or n_rows == 0:
-        if verbose:
-            print(f"  Tile {tile_index} SKIPPED: zero dimension")
-        return None
-
-    # Build the computePixels request
-    request = {
-        "expression": forest_img,
-        "fileFormat": "GEO_TIFF",
-        "grid": {
-            "dimensions": {
-                "width": n_cols,
-                "height": n_rows,
-            },
-            "affineTransform": {
-                "scaleX": SCALE,
-                "shearX": 0,
-                "translateX": xmin,
-                "shearY": 0,
-                "scaleY": -SCALE,
-                "translateY": ymax,
-            },
-            "crsCode": "EPSG:4326",
-        },
-    }
-
-    for attempt in range(1, max_retries + 1):
-        try:
-            result = ee.data.computePixels(request)
-
-            with open(tile_file, "wb") as f:
-                f.write(result)
-
-            # Verify the file is valid
-            ds = gdal.Open(tile_file)
-            if ds is None:
-                raise RuntimeError("GDAL cannot open downloaded tile")
-            if ds.RasterCount != n_bands:
-                raise RuntimeError(
-                    f"Expected {n_bands} bands, got {ds.RasterCount}"
-                )
-            ds = None
-
-            if verbose:
-                print(f"  Tile {tile_index} OK "
-                      f"({n_cols}x{n_rows} px, {n_bands} bands)")
-            return tile_file
-
-        except Exception as e:
-            if verbose:
-                print(f"  Tile {tile_index} attempt {attempt}/{max_retries} "
-                      f"FAILED: {e}")
-            if attempt < max_retries:
-                wait = min(2 ** attempt, 30)
-                time.sleep(wait)
-
-    if verbose:
-        print(f"  Tile {tile_index} FAILED after {max_retries} attempts")
-    return None
-
-
-# ============================================================
-# Mosaicking
-# ============================================================
-
-def _mosaic_tiles(tile_files, output_file, crop_extent=None):
-    """Mosaic tiles into a single GeoTIFF using GDAL VRT.
-
-    :param tile_files: List of tile file paths (may contain None).
-    :param output_file: Path for the output GeoTIFF.
-    :param crop_extent: Optional (xmin, ymin, xmax, ymax) to crop.
-    """
-    valid_files = [f for f in tile_files if f is not None and os.path.exists(f)]
-    if not valid_files:
-        raise RuntimeError("No valid tiles to mosaic.")
-
-    # Remove any NoData from tiles (EE may set NoData=0 which
-    # conflicts with valid 0 = non-forest)
-    for f in valid_files:
-        ds = gdal.Open(f, gdal.GA_Update)
-        if ds is not None:
-            for b in range(1, ds.RasterCount + 1):
-                ds.GetRasterBand(b).DeleteNoDataValue()
-            ds.FlushCache()
-            ds = None
-
-    # Build VRT
-    vrt_file = output_file.replace(".tif", "_mosaic.vrt")
-    vrt_options = gdal.BuildVRTOptions(resolution="highest")
-    vrt_ds = gdal.BuildVRT(vrt_file, valid_files, options=vrt_options)
-    vrt_ds.FlushCache()
-    vrt_ds = None
-
-    # Translate VRT to GeoTIFF (with optional crop)
-    translate_options = {
-        "format": "GTiff",
-        "creationOptions": ["COMPRESS=DEFLATE", "TILED=YES"],
-    }
-
-    if crop_extent is not None:
-        xmin, ymin, xmax, ymax = crop_extent
-        translate_options["projWin"] = [xmin, ymax, xmax, ymin]
-
-    gdal.Translate(output_file, vrt_file, **translate_options)
-
-    # Clean up VRT
-    if os.path.exists(vrt_file):
-        os.remove(vrt_file)
-
-
-def _clip_to_vector(input_file, output_file, vector_path, buff=0.0):
-    """Clip a raster to a vector polygon boundary.
-
-    :param input_file: Path to input GeoTIFF.
-    :param output_file: Path for clipped output GeoTIFF.
-    :param vector_path: Path to vector file (GPKG, SHP, GeoJSON).
-    :param buff: Buffer in degrees applied to the vector geometry.
-    """
-    ds = ogr.Open(str(vector_path))
-    if ds is None:
-        raise FileNotFoundError(
-            f"Cannot open vector file: {vector_path}"
-        )
-    layer = ds.GetLayer()
-    layer_name = layer.GetName()
-    ds = None
-
-    # If buffer is needed, create a buffered vector
-    if buff > 0.0:
-        ds_in = ogr.Open(str(vector_path))
-        layer_in = ds_in.GetLayer()
-        srs = layer_in.GetSpatialRef()
-
-        buff_path = output_file.replace(".tif", "_buff.gpkg")
-        drv = ogr.GetDriverByName("GPKG")
-        if os.path.exists(buff_path):
-            drv.DeleteDataSource(buff_path)
-        ds_buff = drv.CreateDataSource(buff_path)
-        layer_buff = ds_buff.CreateLayer("buffered", srs, ogr.wkbPolygon)
-
-        for feat in layer_in:
-            geom = feat.GetGeometryRef().Buffer(buff)
-            feat_buff = ogr.Feature(layer_buff.GetLayerDefn())
-            feat_buff.SetGeometry(geom)
-            layer_buff.CreateFeature(feat_buff)
-            feat_buff = None
-
-        ds_buff = None
-        ds_in = None
-        cutline_path = buff_path
-        cutline_layer = "buffered"
-    else:
-        cutline_path = str(vector_path)
-        cutline_layer = layer_name
-        buff_path = None
-
-    # CRITICAL: Remove any NoData from source raster before warping.
-    # EE's computePixels may set NoData=0, which causes GDAL Warp
-    # to treat valid 0 (non-forest) pixels as NoData and discard them.
-    src_ds = gdal.Open(input_file, gdal.GA_Update)
-    if src_ds is not None:
-        for b in range(1, src_ds.RasterCount + 1):
-            src_ds.GetRasterBand(b).DeleteNoDataValue()
-        src_ds.FlushCache()
-        src_ds = None
-
-    # Warp with cutline
-    warp_options = gdal.WarpOptions(
-        format="GTiff",
-        cutlineDSName=cutline_path,
-        cutlineLayer=cutline_layer,
-        cropToCutline=True,
-        creationOptions=["COMPRESS=DEFLATE", "TILED=YES"],
-        dstNodata=255,
-    )
-    gdal.Warp(output_file, input_file, options=warp_options)
-
-    # Cleanup buffered vector
-    if buff_path and os.path.exists(buff_path):
-        ogr.GetDriverByName("GPKG").DeleteDataSource(buff_path)
-
-
-# ============================================================
 # Post-processing: export bands and sum
+# (tile download, mosaicking, and clipping now live in data/_ee_utils.py)
 # ============================================================
 
 def export_bands(input_file, output_dir=None, prefix="forest_t",
@@ -513,40 +205,37 @@ def export_bands(input_file, output_dir=None, prefix="forest_t",
     os.makedirs(output_dir, exist_ok=True)
 
     n_bands = ds.RasterCount
-    n_cols = ds.RasterXSize
-    n_rows = ds.RasterYSize
-    gt = ds.GetGeoTransform()
-    proj = ds.GetProjection()
 
+    # Stream each band out with gdal.Translate(bandList=[b]) — GDAL copies via
+    # internal block I/O, so no full band is ever materialised as a numpy array
+    # (the prior ReadAsArray per band held a full ~1.8 GB Byte band for an
+    # Indonesia-scale raster). Pixel values and the nodata value are preserved,
+    # so the exported band data is identical to the prior path.
     output_files = []
     for b in range(1, n_bands + 1):
-        band_data = ds.GetRasterBand(b).ReadAsArray()
         nd = ds.GetRasterBand(b).GetNoDataValue()
+        nodata_val = int(nd) if nd is not None else NODATA_BYTE
         out_path = os.path.join(output_dir, f"{prefix}{b}.tif")
 
-        driver = gdal.GetDriverByName("GTiff")
-        out_ds = driver.Create(
-            out_path, n_cols, n_rows, 1, gdal.GDT_Byte,
-            options=["COMPRESS=DEFLATE", "TILED=YES"],
+        gdal.Translate(
+            out_path, ds,
+            options=gdal.TranslateOptions(
+                format="GTiff",
+                bandList=[b],
+                outputType=gdal.GDT_Byte,
+                noData=nodata_val,
+                creationOptions=GTIFF_OPTS,
+            ),
         )
-        out_ds.SetGeoTransform(gt)
-        out_ds.SetProjection(proj)
-        out_ds.GetRasterBand(1).WriteArray(band_data)
-        if nd is not None:
-            out_ds.GetRasterBand(1).SetNoDataValue(int(nd))
-        else:
-            out_ds.GetRasterBand(1).SetNoDataValue(255)
-        out_ds.FlushCache()
-        out_ds = None
 
         output_files.append(out_path)
         if verbose:
-            print(f"  Band {b} exported: {out_path}")
+            logger.info(f"  Band {b} exported: {out_path}")
 
     ds = None
 
     if verbose:
-        print(f"Exported {n_bands} bands from {input_file}")
+        logger.info(f"Exported {n_bands} bands from {input_file}")
 
     return output_files
 
@@ -592,46 +281,56 @@ def export_period_fcc(input_file, output_dir=None, verbose=True):
         ds = None
         raise ValueError("Need at least 2 bands to compute period FCC.")
 
-    # Read all bands
-    bands = []
-    nodata_mask = np.zeros((n_rows, n_cols), dtype=bool)
-    for b in range(1, n_bands + 1):
-        data = ds.GetRasterBand(b).ReadAsArray()
-        nd = ds.GetRasterBand(b).GetNoDataValue()
-        if nd is not None:
-            nodata_mask |= (data == int(nd))
-        bands.append(data)
-    ds = None
+    # Stream over GDAL block windows: the nodata mask ORs every band, so all
+    # bands are needed per pixel — but only one *block* of each band is held at
+    # a time, not the full bands list + full nodata mask (the prior path kept
+    # all n_bands full arrays resident, ~1.8 GB for Indonesia). Every operation
+    # is elementwise, so per-window output is identical to the whole-array path.
+    src_bands = [ds.GetRasterBand(b) for b in range(1, n_bands + 1)]
+    nds = [b.GetNoDataValue() for b in src_bands]
+    bx, by = src_bands[0].GetBlockSize()
 
+    driver = gdal.GetDriverByName("GTiff")
+    out_dss = []
     output_files = []
     for i in range(n_bands - 1):
-        # fcc_ij: 1 if forest at both ti and tj, 0 if deforested
-        # Pixels not forest at ti are outside the analysis domain → NoData
-        fcc = (bands[i].astype(np.uint8) & bands[i + 1].astype(np.uint8))
-        fcc[bands[i] == 0] = 255
-        fcc[nodata_mask] = 255
-
-        fname = f"fcc{i + 1}{i + 2}.tif"
-        out_path = os.path.join(output_dir, fname)
-
-        driver = gdal.GetDriverByName("GTiff")
+        out_path = os.path.join(output_dir, f"fcc{i + 1}{i + 2}.tif")
         out_ds = driver.Create(
             out_path, n_cols, n_rows, 1, gdal.GDT_Byte,
-            options=["COMPRESS=DEFLATE", "TILED=YES"],
+            options=GTIFF_OPTS,
         )
         out_ds.SetGeoTransform(gt)
         out_ds.SetProjection(proj)
-        out_ds.GetRasterBand(1).WriteArray(fcc)
-        out_ds.GetRasterBand(1).SetNoDataValue(255)
-        out_ds.FlushCache()
-        out_ds = None
-
+        out_ds.GetRasterBand(1).SetNoDataValue(NODATA_BYTE)
+        out_dss.append(out_ds)
         output_files.append(out_path)
-        if verbose:
-            print(f"  Period {i+1}→{i+2} exported: {out_path}")
+
+    for yoff in range(0, n_rows, by):
+        ywin = min(by, n_rows - yoff)
+        for xoff in range(0, n_cols, bx):
+            xwin = min(bx, n_cols - xoff)
+            blocks = [b.ReadAsArray(xoff, yoff, xwin, ywin) for b in src_bands]
+            nodata_mask = np.zeros((ywin, xwin), dtype=bool)
+            for data, nd in zip(blocks, nds):
+                if nd is not None:
+                    nodata_mask |= (data == int(nd))
+            for i in range(n_bands - 1):
+                # fcc_ij: 1 if forest at both ti and tj, 0 if deforested.
+                # Pixels not forest at ti are outside the analysis domain → NoData.
+                fcc = (blocks[i].astype(np.uint8) & blocks[i + 1].astype(np.uint8))
+                fcc[blocks[i] == 0] = NODATA_BYTE
+                fcc[nodata_mask] = NODATA_BYTE
+                out_dss[i].GetRasterBand(1).WriteArray(fcc, xoff, yoff)
+
+    for i, out_ds in enumerate(out_dss):
+        out_ds.FlushCache()
+        out_dss[i] = None
+    ds = None
 
     if verbose:
-        print(f"Exported {len(output_files)} period FCC rasters")
+        for i, out_path in enumerate(output_files):
+            logger.info(f"  Period {i+1}→{i+2} exported: {out_path}")
+        logger.info(f"Exported {len(output_files)} period FCC rasters")
 
     return output_files
 
@@ -662,7 +361,7 @@ def sum_raster_bands(input_file, output_file, verbose=True):
     proj = ds.GetProjection()
 
     if verbose:
-        print(f"Summing {n_bands} bands from {input_file}")
+        logger.info(f"Summing {n_bands} bands from {input_file}")
 
     # Read all bands and build a NoData mask
     nodata_mask = np.zeros((n_rows, n_cols), dtype=bool)
@@ -682,13 +381,13 @@ def sum_raster_bands(input_file, output_file, verbose=True):
     ds = None
 
     # Set NoData pixels to 255 in the output
-    band_sum[nodata_mask] = 255
+    band_sum[nodata_mask] = NODATA_BYTE
 
     # Write output
     driver = gdal.GetDriverByName("GTiff")
     out_ds = driver.Create(
         output_file, n_cols, n_rows, 1, gdal.GDT_Byte,
-        options=["COMPRESS=DEFLATE", "TILED=YES"],
+        options=GTIFF_OPTS,
     )
     out_ds.SetGeoTransform(gt)
     out_ds.SetProjection(proj)
@@ -698,7 +397,7 @@ def sum_raster_bands(input_file, output_file, verbose=True):
     out_ds = None
 
     if verbose:
-        print(f"Output written to {output_file}")
+        logger.info(f"Output written to {output_file}")
 
 
 # ============================================================
@@ -745,13 +444,13 @@ def reproject_raster(input_file, output_file, dst_crs="EPSG:32750",
 
     # Forest cover data uses 255 as NoData; fall back to it if source has none
     if src_nodata is None:
-        src_nodata = 255
+        src_nodata = NODATA_BYTE
 
     warp_options = gdal.WarpOptions(
         format="GTiff",
         dstSRS=dst_crs,
         resampleAlg=resample_map[resampling],
-        creationOptions=["COMPRESS=DEFLATE", "TILED=YES"],
+        creationOptions=GTIFF_OPTS,
         srcNodata=src_nodata,
         dstNodata=src_nodata,
     )
@@ -759,7 +458,7 @@ def reproject_raster(input_file, output_file, dst_crs="EPSG:32750",
     gdal.Warp(output_file, input_file, options=warp_options)
 
     if verbose:
-        print(f"Reprojected: {input_file} → {output_file} [{dst_crs}]")
+        logger.info(f"Reprojected: {input_file} → {output_file} [{dst_crs}]")
 
     return output_file
 
@@ -796,7 +495,7 @@ def reproject_all(file_list, output_dir=None, dst_crs="EPSG:32750",
     return output_files
 
 
-def _set_nodata(file_path, nodata=255):
+def _set_nodata(file_path, nodata=NODATA_BYTE):
     """Set NoData value on all bands of a raster in-place."""
     ds = gdal.Open(file_path, gdal.GA_Update)
     if ds is not None:
@@ -869,7 +568,7 @@ def get_fcc(
     # ---- Parse AOI ----
     extent = _parse_aoi(aoi, buff)
     if verbose:
-        print(f"AOI extent (with buffer): {extent}")
+        logger.info(f"AOI extent (with buffer): {extent}")
 
     # ---- Validate years ----
     if source == "tmf":
@@ -891,7 +590,7 @@ def get_fcc(
 
     # ---- Build forest cover Image ----
     if verbose:
-        print(f"Building forest cover from {source.upper()} "
+        logger.info(f"Building forest cover from {source.upper()} "
               f"for years {years}")
 
     if source == "tmf":
@@ -911,19 +610,19 @@ def get_fcc(
     if tile_size is None:
         tile_size = max_tile_deg
         if verbose:
-            print(f"Auto tile size: {tile_size:.4f}° "
+            logger.info(f"Auto tile size: {tile_size:.4f}° "
                   f"({safe_side}x{safe_side} px) for {n_bands} bands")
     elif tile_size > max_tile_deg:
         if verbose:
-            print(f"WARNING: tile_size={tile_size}° too large for "
+            logger.warning(f"WARNING: tile_size={tile_size}° too large for "
                   f"{n_bands} bands. Reducing to {max_tile_deg:.4f}°")
         tile_size = max_tile_deg
 
     # ---- Snap extent and create tile grid ----
-    snapped_extent = _snap_extent(extent)
-    tiles = _make_grid(snapped_extent, tile_size=tile_size)
+    snapped_extent = _snap_extent(extent, SCALE)
+    tiles = _make_grid(snapped_extent, tile_size, SCALE)
     if verbose:
-        print(f"Number of tiles: {len(tiles)}")
+        logger.info(f"Number of tiles: {len(tiles)}")
 
     # ---- Prepare output directory ----
     output_dir = os.path.dirname(os.path.abspath(output_file))
@@ -939,14 +638,14 @@ def get_fcc(
 
     # ---- Download tiles ----
     download_args = [
-        (tile, forest_img, idx, tile_dir, verbose, n_bands, max_retries)
+        (tile, forest_img, idx, tile_dir, SCALE, n_bands, max_retries, verbose)
         for idx, tile in enumerate(tiles)
     ]
 
     if parallel and len(tiles) > 1:
         ncpu = min(len(tiles), max(1, multiprocessing.cpu_count() - 1), 10)
         if verbose:
-            print(f"Downloading {len(tiles)} tiles in parallel "
+            logger.info(f"Downloading {len(tiles)} tiles in parallel "
                   f"({ncpu} threads)...")
         tile_files = [None] * len(tiles)
         with ThreadPoolExecutor(max_workers=ncpu) as executor:
@@ -959,19 +658,19 @@ def get_fcc(
                 tile_files[idx] = future.result()
     else:
         if verbose:
-            print("Downloading tiles sequentially...")
+            logger.info("Downloading tiles sequentially...")
         tile_files = [_download_tile(args) for args in download_args]
 
     # ---- Check results ----
     n_ok = sum(1 for f in tile_files if f is not None)
     n_fail = len(tiles) - n_ok
     if verbose:
-        print(f"Download complete: {n_ok}/{len(tiles)} tiles OK"
+        logger.info(f"Download complete: {n_ok}/{len(tiles)} tiles OK"
               + (f", {n_fail} failed" if n_fail > 0 else ""))
 
     # ---- Mosaic tiles ----
     if verbose:
-        print("Mosaicking tiles...")
+        logger.info("Mosaicking tiles...")
 
     # First mosaic to a temporary file (full extent)
     aoi_is_vector = isinstance(aoi, (str, Path)) and os.path.isfile(str(aoi))
@@ -982,7 +681,7 @@ def get_fcc(
         _mosaic_tiles(tile_files, mosaic_tmp, crop_extent=None)
 
         if verbose:
-            print("Clipping to AOI vector boundary...")
+            logger.info("Clipping to AOI vector boundary...")
         _clip_to_vector(mosaic_tmp, output_file, str(aoi), buff=0.0)
 
         # Cleanup temp mosaic
@@ -990,12 +689,12 @@ def get_fcc(
             os.remove(mosaic_tmp)
     else:
         # Crop to rectangular extent only
-        crop_extent = _snap_extent(extent) if crop_to_aoi else None
+        crop_extent = _snap_extent(extent, SCALE) if crop_to_aoi else None
         _mosaic_tiles(tile_files, output_file, crop_extent=crop_extent)
 
         # Set NoData=255 on the mosaicked output so reprojection
         # fills outside-extent areas with 255 instead of 0
-        _set_nodata(output_file, nodata=255)
+        _set_nodata(output_file, nodata=NODATA_BYTE)
 
     # ---- Cleanup tile files ----
     for f in tile_files:
@@ -1010,7 +709,7 @@ def get_fcc(
     # ---- Export individual bands ----
     if export_individual:
         if verbose:
-            print("Exporting individual forest bands...")
+            logger.info("Exporting individual forest bands...")
         band_files = export_bands(
             input_file=output_file,
             output_dir=output_dir,
@@ -1022,7 +721,7 @@ def get_fcc(
     # ---- Export FCC trajectory raster ----
     if export_fcc:
         if verbose:
-            print("Computing FCC trajectory raster...")
+            logger.info("Computing FCC trajectory raster...")
         indices = "".join(str(i + 1) for i in range(len(years)))
         fcc_file = os.path.join(output_dir, f"fcc{indices}.tif")
         sum_raster_bands(
@@ -1035,7 +734,7 @@ def get_fcc(
     # ---- Export period FCC rasters ----
     if export_period and len(years) >= 2:
         if verbose:
-            print("Exporting period deforestation rasters...")
+            logger.info("Exporting period deforestation rasters...")
         period_files = export_period_fcc(
             input_file=output_file,
             output_dir=output_dir,
@@ -1046,7 +745,7 @@ def get_fcc(
     # ---- Reproject all outputs ----
     if output_crs is not None:
         if verbose:
-            print(f"Reprojecting all outputs to {output_crs}...")
+            logger.info(f"Reprojecting all outputs to {output_crs}...")
 
         # Collect all files to reproject
         all_files = [output_file]
@@ -1069,21 +768,21 @@ def get_fcc(
                 os.remove(tmp)
 
     if verbose:
-        print("=" * 60)
-        print("All outputs:")
+        logger.info("=" * 60)
+        logger.info("All outputs:")
         crs_label = f" [{output_crs}]" if output_crs else " [EPSG:4326]"
-        print(f"  Projection              : {crs_label.strip(' []')}")
-        print(f"  Multi-band forest cover : {output_file}")
+        logger.info(f"  Projection              : {crs_label.strip(' []')}")
+        logger.info(f"  Multi-band forest cover : {output_file}")
         if export_individual:
             for bf in result["forest_bands"]:
-                print(f"  Individual band         : {bf}")
+                logger.info(f"  Individual band         : {bf}")
         if export_fcc:
-            print(f"  FCC trajectory          : {result['fcc']}")
+            logger.info(f"  FCC trajectory          : {result['fcc']}")
         if export_period and "fcc_periods" in result:
             for pf in result["fcc_periods"]:
-                print(f"  Period deforestation    : {pf}")
-        print("=" * 60)
-        print("Done!")
+                logger.info(f"  Period deforestation    : {pf}")
+        logger.info("=" * 60)
+        logger.info("Done!")
 
     return result
 
@@ -1091,6 +790,35 @@ def get_fcc(
 # ── RunContext-aware entry point ──────────────────────────────
 
 from palmdef_risk.io.run import RunContext
+
+
+def _forest_outputs(years) -> list[str]:
+    """Filenames get_fcc() produces for a run with these ``years``.
+
+    forest_cover.tif + one band per year (forest_t1..N) + the FCC trajectory
+    raster (fcc<1..N>.tif) + one period raster per consecutive pair
+    (fcc12.tif, fcc23.tif, ...). For N=2 the trajectory and the single period
+    raster share the name fcc12.tif (the duplicate is harmless).
+    """
+    n = len(years)
+    names = ["forest_cover.tif"]
+    names += [f"forest_t{i}.tif" for i in range(1, n + 1)]
+    names.append("fcc" + "".join(str(i) for i in range(1, n + 1)) + ".tif")
+    names += [f"fcc{i}{i + 1}.tif" for i in range(1, n)]
+    return names
+
+
+def _forest_complete(out_dir, years) -> bool:
+    """True only when every get_fcc output exists and is non-empty.
+
+    A partial download (e.g. only fcc23.tif present) must NOT be treated as
+    done — that would let align fail later with a cryptic missing-raster error.
+    """
+    for name in _forest_outputs(years):
+        p = out_dir / name
+        if not p.exists() or p.stat().st_size == 0:
+            return False
+    return True
 
 
 def download_forest(ctx: RunContext, use_cache: bool = True) -> dict:
@@ -1117,11 +845,11 @@ def download_forest(ctx: RunContext, use_cache: bool = True) -> dict:
         for _f in _cache_d.iterdir():
             if _f.name != "metadata.json":
                 shutil.copy2(_f, out_dir / _f.name)
-        print("Forest: loaded from cross-run cache.")
+        logger.info("Forest: loaded from cross-run cache.")
         return {"forest_cover": str(out_dir / "forest_cover.tif")}
 
-    if use_cache and (out_dir / "fcc23.tif").exists():
-        print("Forest: outputs already present in run folder, skipping.")
+    if use_cache and _forest_complete(out_dir, cfg.forest_years):
+        logger.info("Forest: outputs already present in run folder, skipping.")
         return {"forest_cover": str(out_dir / "forest_cover.tif")}
 
     ee.Initialize(

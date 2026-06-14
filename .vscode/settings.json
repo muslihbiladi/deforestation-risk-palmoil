@@ -1,5 +1,0 @@
-{
-  "yaml.schemas": {
-    "./active/configs/schema.json": "active/configs/*.yaml"
-  }
-}

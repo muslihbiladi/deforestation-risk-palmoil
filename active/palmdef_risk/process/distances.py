@@ -9,16 +9,10 @@ from osgeo import gdal
 if TYPE_CHECKING:
     from palmdef_risk.io.run import RunContext
 
+from palmdef_risk.io.helpers import raster_shape as _raster_shape
+from palmdef_risk.constants import NODATA_FLOAT, GTIFF_OPTS
+
 logger = logging.getLogger(__name__)
-
-
-def _raster_shape(path: Path):
-    ds = gdal.Open(str(path))
-    if ds is None:
-        return None
-    s = (ds.RasterYSize, ds.RasterXSize)
-    ds = None
-    return s
 
 
 def _needs_recompute(out_path: Path, ref_shape: tuple) -> bool:
@@ -37,33 +31,46 @@ def _needs_recompute(out_path: Path, ref_shape: tuple) -> bool:
 
 
 def _proximity_from_raster(src_path: Path, out_path: Path, target_value: int = 0) -> None:
-    """Compute GDAL proximity (metres) to pixels where value == target_value."""
+    """Compute GDAL proximity (metres) to pixels where value == target_value.
+
+    The binary target mask is built directly into the MEM Byte raster that
+    ComputeProximity consumes, streaming the source block-by-block. The full
+    source array and a separate full uint8 mask never coexist with the MEM
+    copy (the prior code held all three); only the MEM mask — which proximity
+    requires whole — stays resident. The mask is pixel-identical to
+    ``(arr == target_value)``, so the proximity output is unchanged.
+    """
     ds = gdal.Open(str(src_path))
-    arr = ds.GetRasterBand(1).ReadAsArray()
+    band = ds.GetRasterBand(1)
     gt = ds.GetGeoTransform()
     proj = ds.GetProjection()
-    ny, nx = arr.shape
-    ds = None
+    nx, ny = band.XSize, band.YSize
+    bx, by = band.GetBlockSize()
 
-    mask = (arr == target_value).astype(np.uint8)
-
-    drv = gdal.GetDriverByName("MEM")
-    src_ds = drv.Create("", nx, ny, 1, gdal.GDT_Byte)
+    src_ds = gdal.GetDriverByName("MEM").Create("", nx, ny, 1, gdal.GDT_Byte)
     src_ds.SetGeoTransform(gt)
     src_ds.SetProjection(proj)
-    src_ds.GetRasterBand(1).WriteArray(mask)
+    mask_band = src_ds.GetRasterBand(1)
+    for yoff in range(0, ny, by):
+        ywin = min(by, ny - yoff)
+        for xoff in range(0, nx, bx):
+            xwin = min(bx, nx - xoff)
+            blk = band.ReadAsArray(xoff, yoff, xwin, ywin)
+            mask_band.WriteArray((blk == target_value).astype(np.uint8), xoff, yoff)
+    ds = None
 
     out_ds = gdal.GetDriverByName("GTiff").Create(
         str(out_path), nx, ny, 1, gdal.GDT_Float32,
-        options=["COMPRESS=LZW", "TILED=YES"],
+        options=GTIFF_OPTS,
     )
     out_ds.SetGeoTransform(gt)
     out_ds.SetProjection(proj)
-    gdal.ComputeProximity(src_ds.GetRasterBand(1), out_ds.GetRasterBand(1),
+    gdal.ComputeProximity(mask_band, out_ds.GetRasterBand(1),
                           options=["DISTUNITS=GEO"])
-    out_ds.GetRasterBand(1).SetNoDataValue(-9999.0)
+    out_ds.GetRasterBand(1).SetNoDataValue(NODATA_FLOAT)
     out_ds.FlushCache()
     out_ds = None
+    src_ds = None
 
 
 def _resample_to_ref(src: Path, ref: Path, out: Path) -> None:
@@ -85,7 +92,7 @@ def _resample_to_ref(src: Path, ref: Path, out: Path) -> None:
             outputBounds=[xmin, ymin, xmax, ymax],
             width=nx, height=ny,
             resampleAlg=gdal.GRA_NearestNeighbour,
-            creationOptions=["COMPRESS=LZW", "TILED=YES"],
+            creationOptions=GTIFF_OPTS,
         ),
     )
 

@@ -1,11 +1,14 @@
 from __future__ import annotations
 import logging
 import pickle
+import re
 from pathlib import Path
 from typing import TYPE_CHECKING
 
 import numpy as np
 import pandas as pd
+
+from palmdef_risk.parallel import run_parallel
 
 if TYPE_CHECKING:
     from palmdef_risk.io.run import RunContext
@@ -43,6 +46,18 @@ def variant_extra_cols(variant: str) -> list[str]:
             f"Unknown variant: {variant!r}. Valid variants: A, B, C, D, E"
         )
     return list(_VARIANT_EXTRA_COLS[variant])
+
+
+def base_dropna_cols() -> list[str]:
+    """Columns that must be non-NaN before the design matrix is built.
+
+    Single source for the base dropna subset shared by fit (_build_and_fit),
+    diagnostics, and reports — previously hard-coded identically in each.
+    Variant-specific extras come from variant_extra_cols().
+    """
+    return ["fcc23", "altitude", "slope", "protected", "cell"] + [
+        f"log_{c}" for c in _LOG_DIST_COLS
+    ]
 
 
 def build_formula(variant: str, data: pd.DataFrame) -> str:
@@ -100,6 +115,54 @@ def prepare_sample(data: pd.DataFrame) -> pd.DataFrame:
     return data
 
 
+def load_design_matrix(
+    ctx: "RunContext",
+    variant: str,
+    formula: str,
+    dropna: str = "base",
+) -> tuple[pd.DataFrame, "np.ndarray", "np.ndarray"]:
+    """Rebuild the patsy design matrices for a fitted variant from sample.csv.
+
+    Reads ``<ctx.output_dir>/sample.csv``, applies prepare_sample(), drops NaN
+    rows per ``dropna``, then builds (y, x) from ``formula``. This is the
+    canonical "rebuild from sample.csv at predict time" path — it never pickles
+    or loads a patsy DesignInfo (project rule).
+
+    Single source for the sample-load + design-matrix logic previously
+    triplicated across diagnostics, reports, and predict (×2).
+
+    dropna:
+      ``"base"``   – drop NaN on base_dropna_cols() + variant_extra_cols(variant);
+                     matches fit_model. Used by diagnostics and reports.
+      ``"scaled"`` – drop NaN only on the scale()-wrapped columns parsed from
+                     ``formula``, so scale() statistics match what fit_model
+                     computed. Used by predict (the row subset must equal the
+                     fit-time subset for the scale means/stds to line up).
+
+    Returns ``(data, y, x)``: the surviving DataFrame and the patsy y / x
+    matrices (each carrying a fresh ``.design_info``).
+    """
+    from patsy import dmatrices
+
+    data = pd.read_csv(ctx.output_dir / "sample.csv")
+    data = prepare_sample(data)
+
+    if dropna == "base":
+        subset = base_dropna_cols() + variant_extra_cols(variant)
+        data = data.dropna(subset=subset)
+    elif dropna == "scaled":
+        scaled_cols = re.findall(r"scale\((\w+)\)", formula)
+        if scaled_cols:
+            data = data.dropna(subset=scaled_cols)
+    else:
+        raise ValueError(
+            f"Unknown dropna mode: {dropna!r}. Use 'base' or 'scaled'."
+        )
+
+    y, x = dmatrices(formula, data, return_type="matrix")
+    return data, y, x
+
+
 def _build_and_fit(
     variant: str,
     ctx: "RunContext",
@@ -120,12 +183,9 @@ def _build_and_fit(
 
     # patsy's scale() sums all values including NaN → mean becomes NaN → all rows dropped.
     # Drop NaN rows on formula columns BEFORE building the formula.
-    base_cols = ["fcc23", "altitude", "slope", "protected", "cell"] + [
-        f"log_{c}" for c in _LOG_DIST_COLS
-    ]
     extra_cols = variant_extra_cols(variant)
     n_before = len(data)
-    data = data.dropna(subset=base_cols + extra_cols)
+    data = data.dropna(subset=base_dropna_cols() + extra_cols)
     if (n_dropped := n_before - len(data)):
         logger.warning("Dropped %d rows with NaN in formula columns", n_dropped)
 
@@ -182,29 +242,65 @@ def fit_model(
     return pkl_path
 
 
+def _fit_one_variant(task: tuple) -> str:
+    """Module-level worker: fit one variant in its own process.
+
+    Data crosses the pool boundary as paths, never live objects (CLAUDE.md
+    "parallelism"): the run dir is reloaded into a RunContext, and the shared,
+    variant-invariant cellneigh adjacency is loaded from .npy rather than pickled
+    through the pool. Honors the pkl skip-guard. Re-raises on failure so fit_all
+    stays fail-fast (run_parallel propagates the exception via future.result()).
+    """
+    variant, run_dir, nneigh_path, adj_path = task
+    from palmdef_risk.io.run import load_run
+    ctx = load_run(run_dir)
+    pkl_path = ctx.output_dir / "models" / f"model_{variant}" / f"mod_{variant}.pkl"
+    if pkl_path.exists():
+        logger.info("mod_%s.pkl exists — skipping fit", variant)
+        return str(pkl_path)
+    nneigh = np.load(nneigh_path)
+    adj = np.load(adj_path)
+    try:
+        return str(fit_model(variant, ctx, nneigh=nneigh, adj=adj))
+    except Exception:
+        import traceback
+        logger.error("Model %s failed:\n%s", variant, traceback.format_exc())
+        raise  # Re-raise so the notebook shows the real error (fail-fast)
+
+
 def fit_all(ctx: "RunContext") -> list[Path]:
-    """Fit all configured model variants sequentially."""
+    """Fit all configured model variants in parallel via run_parallel.
+
+    cellneigh is computed once (variant-invariant) and persisted to .npy so each
+    worker loads the shared adjacency by path. One process per variant, bounded
+    by ram_per_icar_gb. A worker failure propagates (fail-fast), matching the
+    previous sequential loop.
+    """
     import forestatrisk as far
-    from tqdm.auto import tqdm
-    results = []
-    variants = list(ctx.config.model_variants)
     cfg = ctx.config
+    variants = list(cfg.model_variants)
     nneigh, adj = far.cellneigh(
         raster=str(ctx.data_dir / "fcc23.tif"),
         csize=cfg.csize,
         rank=1,
     )
-    for v in tqdm(variants, desc="Fitting iCAR models", unit="variant"):
-        pkl_path = ctx.output_dir / "models" / f"model_{v}" / f"mod_{v}.pkl"
-        if pkl_path.exists():
-            logger.info("mod_%s.pkl exists — skipping fit", v)
-            results.append(pkl_path)
-            continue
-        try:
-            path = fit_model(v, ctx, nneigh=nneigh, adj=adj)
-            results.append(path)
-        except Exception:
-            import traceback
-            logger.error("Model %s failed:\n%s", v, traceback.format_exc())
-            raise  # Re-raise so the notebook shows the real error
-    return results
+    models_dir = ctx.output_dir / "models"
+    models_dir.mkdir(parents=True, exist_ok=True)
+    nneigh_path = models_dir / "_cellneigh_nneigh.npy"
+    adj_path = models_dir / "_cellneigh_adj.npy"
+    np.save(nneigh_path, np.asarray(nneigh))
+    np.save(adj_path, np.asarray(adj))
+
+    tasks = [
+        (v, str(ctx.run_dir), str(nneigh_path), str(adj_path)) for v in variants
+    ]
+    try:
+        paths = run_parallel(
+            _fit_one_variant, tasks,
+            ram_per_task_gb=cfg.ram_per_icar_gb, cfg=cfg,
+            desc="Fitting iCAR models",
+        )
+    finally:
+        nneigh_path.unlink(missing_ok=True)
+        adj_path.unlink(missing_ok=True)
+    return [Path(p) for p in paths]

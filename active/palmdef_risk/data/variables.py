@@ -59,6 +59,7 @@ import os
 import json
 import math
 import time
+import logging
 import requests
 import multiprocessing
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -69,6 +70,21 @@ import numpy as np
 import geopandas as gpd
 from shapely.geometry import box as shapely_box
 from osgeo import gdal, ogr, osr
+
+# Shared GEE download helpers (also re-exported here so palmdef_risk.data.plantation
+# can keep importing _parse_aoi / _clip_to_vector from this module).
+from palmdef_risk.data._ee_utils import (
+    _get_extent_from_vector,
+    _parse_aoi,
+    _snap_extent,
+    _make_grid,
+    _download_tile,
+    _mosaic_tiles,
+    _clip_to_vector,
+)
+from palmdef_risk.constants import NODATA_BYTE, NODATA_FLOAT, GTIFF_OPTS
+
+logger = logging.getLogger(__name__)
 
 gdal.UseExceptions()
 
@@ -109,51 +125,9 @@ OSM_TOWN_TAGS = {
 
 
 # ============================================================
-# AOI parsing  (mirrors forest_downloader.py)
+# AOI parsing
+# (_get_extent_from_vector and _parse_aoi now live in data/_ee_utils.py)
 # ============================================================
-
-def _get_extent_from_vector(vector_path):
-    """Get bounding box from a vector file in EPSG:4326."""
-    ds = ogr.Open(str(vector_path))
-    if ds is None:
-        raise FileNotFoundError(f"Cannot open vector file: {vector_path}")
-    layer = ds.GetLayer()
-    srs_src = layer.GetSpatialRef()
-    xmin, xmax, ymin, ymax = layer.GetExtent()
-
-    srs_4326 = osr.SpatialReference()
-    srs_4326.ImportFromEPSG(4326)
-    srs_4326.SetAxisMappingStrategy(osr.OAMS_TRADITIONAL_GIS_ORDER)
-
-    if srs_src is not None:
-        srs_src.SetAxisMappingStrategy(osr.OAMS_TRADITIONAL_GIS_ORDER)
-        if not srs_src.IsSame(srs_4326):
-            transform = osr.CoordinateTransformation(srs_src, srs_4326)
-            corners = [(xmin, ymin), (xmin, ymax),
-                       (xmax, ymin), (xmax, ymax)]
-            xs, ys = [], []
-            for cx, cy in corners:
-                tx, ty, _ = transform.TransformPoint(cx, cy)
-                xs.append(tx)
-                ys.append(ty)
-            xmin, ymin = min(xs), min(ys)
-            xmax, ymax = max(xs), max(ys)
-    ds = None
-    return (xmin, ymin, xmax, ymax)
-
-
-def _parse_aoi(aoi, buff=0.0):
-    """Parse AOI into (xmin, ymin, xmax, ymax) with optional buffer."""
-    if isinstance(aoi, (tuple, list)) and len(aoi) == 4:
-        xmin, ymin, xmax, ymax = aoi
-    elif isinstance(aoi, (str, Path)):
-        xmin, ymin, xmax, ymax = _get_extent_from_vector(aoi)
-    else:
-        raise ValueError(
-            "aoi must be (xmin, ymin, xmax, ymax) or a vector file path."
-        )
-    return (xmin - buff, ymin - buff, xmax + buff, ymax + buff)
-
 
 def _load_aoi_polygon(aoi, buff=0.0):
     """Load AOI as a shapely polygon in EPSG:4326.
@@ -181,171 +155,9 @@ def _load_aoi_polygon(aoi, buff=0.0):
 
 
 # ============================================================
-# Grid snapping and tiling  (mirrors forest_downloader.py)
-# ============================================================
-
-def _snap_extent(extent, scale):
-    """Snap extent to a global pixel grid."""
-    xmin, ymin, xmax, ymax = extent
-    return (
-        math.floor(xmin / scale) * scale,
-        math.floor(ymin / scale) * scale,
-        math.ceil(xmax / scale) * scale,
-        math.ceil(ymax / scale) * scale,
-    )
-
-
-def _make_grid(extent, tile_size, scale):
-    """Create a list of tile extents snapped to the pixel grid."""
-    xmin, ymin, xmax, ymax = extent
-    ts = round(tile_size / scale) * scale
-    tiles = []
-    y = ymin
-    while y < ymax:
-        x = xmin
-        y_top = min(y + ts, ymax)
-        while x < xmax:
-            x_right = min(x + ts, xmax)
-            tiles.append((x, y, x_right, y_top))
-            x = x_right
-        y = y_top
-    return tiles
-
-
-# ============================================================
-# GEE tile download via computePixels
-# ============================================================
-
-def _download_tile_generic(args):
-    """Download one tile using ee.data.computePixels."""
-    (tile_extent, ee_image, tile_index, output_dir,
-     scale, n_bands, max_retries, verbose) = args
-    xmin, ymin, xmax, ymax = tile_extent
-    tile_file = os.path.join(output_dir, f"tile_{tile_index:04d}.tif")
-
-    n_cols = round((xmax - xmin) / scale)
-    n_rows = round((ymax - ymin) / scale)
-    if n_cols == 0 or n_rows == 0:
-        return None
-
-    request = {
-        "expression": ee_image,
-        "fileFormat": "GEO_TIFF",
-        "grid": {
-            "dimensions": {"width": n_cols, "height": n_rows},
-            "affineTransform": {
-                "scaleX": scale, "shearX": 0, "translateX": xmin,
-                "shearY": 0, "scaleY": -scale, "translateY": ymax,
-            },
-            "crsCode": "EPSG:4326",
-        },
-    }
-
-    for attempt in range(1, max_retries + 1):
-        try:
-            result = ee.data.computePixels(request)
-            with open(tile_file, "wb") as f:
-                f.write(result)
-            ds = gdal.Open(tile_file)
-            if ds is None:
-                raise RuntimeError("GDAL cannot open tile")
-            if ds.RasterCount != n_bands:
-                raise RuntimeError(
-                    f"Expected {n_bands} bands, got {ds.RasterCount}")
-            ds = None
-            if verbose:
-                print(f"  Tile {tile_index} OK ({n_cols}x{n_rows} px)")
-            return tile_file
-        except Exception as e:
-            if verbose:
-                print(f"  Tile {tile_index} attempt "
-                      f"{attempt}/{max_retries} FAILED: {e}")
-            if attempt < max_retries:
-                time.sleep(min(2 ** attempt, 30))
-
-    return None
-
-
-# ============================================================
-# Mosaicking and clipping (mirrors forest_downloader.py)
-# ============================================================
-
-def _mosaic_tiles(tile_files, output_file, crop_extent=None):
-    """Mosaic tiles into a single GeoTIFF via GDAL VRT."""
-    valid = [f for f in tile_files if f and os.path.exists(f)]
-    if not valid:
-        raise RuntimeError("No valid tiles to mosaic.")
-
-    for f in valid:
-        ds = gdal.Open(f, gdal.GA_Update)
-        if ds:
-            for b in range(1, ds.RasterCount + 1):
-                ds.GetRasterBand(b).DeleteNoDataValue()
-            ds.FlushCache()
-            ds = None
-
-    vrt = output_file.replace(".tif", "_mosaic.vrt")
-    vrt_ds = gdal.BuildVRT(
-        vrt, valid, options=gdal.BuildVRTOptions(resolution="highest"))
-    vrt_ds.FlushCache()
-    vrt_ds = None
-
-    opts = {"format": "GTiff",
-            "creationOptions": ["COMPRESS=DEFLATE", "TILED=YES"]}
-    if crop_extent:
-        xmin, ymin, xmax, ymax = crop_extent
-        opts["projWin"] = [xmin, ymax, xmax, ymin]
-    gdal.Translate(output_file, vrt, **opts)
-
-    if os.path.exists(vrt):
-        os.remove(vrt)
-
-
-def _clip_to_vector(input_file, output_file, vector_path, nodata=255):
-    """Clip a raster to a vector boundary.
-
-    Handles CRS mismatch: if the vector and raster are in different
-    coordinate systems, the cutlineSRS is set so GDAL reprojects
-    the cutline on the fly. Works with both GPKG and SHP.
-    """
-    ds = ogr.Open(str(vector_path))
-    if ds is None:
-        raise FileNotFoundError(f"Cannot open vector: {vector_path}")
-    layer = ds.GetLayer()
-    layer_name = layer.GetName()
-
-    # Get the CRS of the cutline vector
-    vec_srs = layer.GetSpatialRef()
-    cutline_srs = None
-    if vec_srs is not None:
-        cutline_srs = vec_srs.ExportToWkt()
-    ds = None
-
-    src = gdal.Open(input_file, gdal.GA_Update)
-    if src:
-        for b in range(1, src.RasterCount + 1):
-            src.GetRasterBand(b).DeleteNoDataValue()
-        src.FlushCache()
-        src = None
-
-    warp_kwargs = dict(
-        format="GTiff",
-        cutlineDSName=str(vector_path),
-        cutlineLayer=layer_name,
-        cropToCutline=True,
-        creationOptions=["COMPRESS=DEFLATE", "TILED=YES"],
-        dstNodata=nodata,
-    )
-    # Tell GDAL the CRS of the cutline so it can reproject if needed
-    if cutline_srs is not None:
-        warp_kwargs["cutlineSRS"] = cutline_srs
-
-    gdal.Warp(output_file, input_file,
-              options=gdal.WarpOptions(**warp_kwargs))
-
-
-# ============================================================
 # Generic GEE raster downloader
+# (grid snapping/tiling, the tile-download kernel, mosaicking, and clipping
+#  now live in data/_ee_utils.py)
 # ============================================================
 
 def _download_ee_raster(ee_image, aoi, output_file, scale=SCALE_90M,
@@ -364,13 +176,13 @@ def _download_ee_raster(ee_image, aoi, output_file, scale=SCALE_90M,
         tile_size = max_tile_deg
 
     if verbose:
-        print(f"  Scale: {scale:.10f} | Tile: {tile_size:.4f} "
+        logger.info(f"  Scale: {scale:.10f} | Tile: {tile_size:.4f} "
               f"| Bands: {n_bands}")
 
     snapped = _snap_extent(extent, scale)
     tiles = _make_grid(snapped, tile_size, scale)
     if verbose:
-        print(f"  Tiles: {len(tiles)}")
+        logger.info(f"  Tiles: {len(tiles)}")
 
     out_dir = os.path.dirname(os.path.abspath(output_file))
     os.makedirs(out_dir, exist_ok=True)
@@ -386,23 +198,23 @@ def _download_ee_raster(ee_image, aoi, output_file, scale=SCALE_90M,
         ncpu = min(len(tiles), max(1, multiprocessing.cpu_count() - 1), 10)
         tile_files = [None] * len(tiles)
         with ThreadPoolExecutor(max_workers=ncpu) as pool:
-            fmap = {pool.submit(_download_tile_generic, a): a[2]
+            fmap = {pool.submit(_download_tile, a): a[2]
                     for a in dl_args}
             for fut in as_completed(fmap):
                 tile_files[fmap[fut]] = fut.result()
     else:
-        tile_files = [_download_tile_generic(a) for a in dl_args]
+        tile_files = [_download_tile(a) for a in dl_args]
 
     n_ok = sum(1 for f in tile_files if f)
     if verbose:
-        print(f"  Downloaded: {n_ok}/{len(tiles)} tiles")
+        logger.info(f"  Downloaded: {n_ok}/{len(tiles)} tiles")
 
     aoi_is_vector = (isinstance(aoi, (str, Path))
                      and os.path.isfile(str(aoi)))
     if crop_to_aoi and aoi_is_vector:
         tmp = output_file.replace(".tif", "_mosaic_tmp.tif")
         _mosaic_tiles(tile_files, tmp)
-        nd = nodata if nodata is not None else 255
+        nd = nodata if nodata is not None else NODATA_BYTE
         _clip_to_vector(tmp, output_file, str(aoi), nodata=nd)
         if os.path.exists(tmp):
             os.remove(tmp)
@@ -417,7 +229,7 @@ def _download_ee_raster(ee_image, aoi, output_file, scale=SCALE_90M,
         os.rmdir(tile_dir)
 
     if verbose:
-        print(f"  Output: {output_file}")
+        logger.info(f"  Output: {output_file}")
     return output_file
 
 
@@ -484,7 +296,7 @@ def _reproject_raster(input_file, output_file, dst_crs,
         format="GTiff", dstSRS=dst_crs,
         resampleAlg=resample_map.get(resampling,
                                      gdal.GRA_NearestNeighbour),
-        creationOptions=["COMPRESS=DEFLATE", "TILED=YES"],
+        creationOptions=GTIFF_OPTS,
     )
     if nd is not None:
         opts["srcNodata"] = nd
@@ -551,7 +363,7 @@ def _reproject_vector(input_path, output_path, dst_crs, verbose=True):
     ds_in = None
 
     if verbose:
-        print(f"  Reprojected vector → {dst_crs}: {output_path}")
+        logger.info(f"  Reprojected vector → {dst_crs}: {output_path}")
     return output_path
 
 
@@ -575,8 +387,8 @@ def get_srtm(aoi, output_dir="data", buff=0.0, crop_to_aoi=True,
     :return: Dict with 'altitude' and 'slope' file paths.
     """
     if verbose:
-        print("=" * 60)
-        print("Downloading SRTM (altitude + slope) from GEE...")
+        logger.info("=" * 60)
+        logger.info("Downloading SRTM (altitude + slope) from GEE...")
 
     os.makedirs(output_dir, exist_ok=True)
     combined = os.path.join(output_dir, "_srtm_combined.tif")
@@ -599,7 +411,7 @@ def get_srtm(aoi, output_dir="data", buff=0.0, crop_to_aoi=True,
     # Band 1: altitude
     alt_path = os.path.join(output_dir, "altitude.tif")
     alt_ds = drv.Create(alt_path, nx, ny, 1, gdal.GDT_Int16,
-                        ["COMPRESS=DEFLATE", "TILED=YES"])
+                        GTIFF_OPTS)
     alt_ds.SetGeoTransform(gt)
     alt_ds.SetProjection(proj)
     alt_ds.GetRasterBand(1).WriteArray(ds.GetRasterBand(1).ReadAsArray())
@@ -611,13 +423,13 @@ def get_srtm(aoi, output_dir="data", buff=0.0, crop_to_aoi=True,
     # Band 2: slope
     slp_path = os.path.join(output_dir, "slope.tif")
     slp_ds = drv.Create(slp_path, nx, ny, 1, gdal.GDT_Float32,
-                        ["COMPRESS=DEFLATE", "TILED=YES"])
+                        GTIFF_OPTS)
     slp_ds.SetGeoTransform(gt)
     slp_ds.SetProjection(proj)
     slope_arr = ds.GetRasterBand(2).ReadAsArray().astype(np.float32)
-    slope_arr[slope_arr == -32768] = -9999.0  # remap clip sentinel to declared nodata
+    slope_arr[slope_arr == -32768] = NODATA_FLOAT  # remap clip sentinel to declared nodata
     slp_ds.GetRasterBand(1).WriteArray(slope_arr)
-    slp_ds.GetRasterBand(1).SetNoDataValue(-9999.0)
+    slp_ds.GetRasterBand(1).SetNoDataValue(NODATA_FLOAT)
     slp_ds.FlushCache()
     slp_ds = None
     result["slope"] = slp_path
@@ -627,8 +439,8 @@ def get_srtm(aoi, output_dir="data", buff=0.0, crop_to_aoi=True,
         os.remove(combined)
 
     if verbose:
-        print(f"  altitude : {alt_path}")
-        print(f"  slope    : {slp_path}")
+        logger.info(f"  altitude : {alt_path}")
+        logger.info(f"  slope    : {slp_path}")
 
     # Reproject if requested
     if output_crs is not None:
@@ -640,7 +452,7 @@ def get_srtm(aoi, output_dir="data", buff=0.0, crop_to_aoi=True,
                               resampling=rsmp, resolution=30)
             os.remove(tmp)
             if verbose:
-                print(f"  Reprojected {var} → {output_crs} (30m)")
+                logger.info(f"  Reprojected {var} → {output_crs} (30m)")
 
     return result
 
@@ -674,8 +486,8 @@ def get_ghsl(aoi, years, output_dir="data", buff=0.0, crop_to_aoi=True,
     :return: Dict with 'ghsl_built_t2' and 'ghsl_built_t3' keys → file paths.
     """
     if verbose:
-        print("=" * 60)
-        print("Downloading GHSL built-up surface from GEE (100m, GHS_BUILT_S)...")
+        logger.info("=" * 60)
+        logger.info("Downloading GHSL built-up surface from GEE (100m, GHS_BUILT_S)...")
 
     os.makedirs(output_dir, exist_ok=True)
     results = {}
@@ -686,7 +498,7 @@ def get_ghsl(aoi, years, output_dir="data", buff=0.0, crop_to_aoi=True,
 
         if verbose:
             snap_note = f" → snapped to {epoch}" if epoch != year else ""
-            print(f"\n  [{label}] year={year}{snap_note}")
+            logger.info(f"\n  [{label}] year={year}{snap_note}")
 
         _download_ee_raster(
             ee_image=ee_ghsl_built(year),
@@ -697,7 +509,7 @@ def get_ghsl(aoi, years, output_dir="data", buff=0.0, crop_to_aoi=True,
             bytes_per_pixel=4,  # source bands are float32; conservative sizing
             buff=buff,
             crop_to_aoi=crop_to_aoi,
-            nodata=255,
+            nodata=NODATA_BYTE,
             parallel=parallel,
             max_retries=max_retries,
             verbose=verbose,
@@ -712,10 +524,10 @@ def get_ghsl(aoi, years, output_dir="data", buff=0.0, crop_to_aoi=True,
                               resampling="near", resolution=100)
             os.remove(tmp)
             if verbose:
-                print(f"  Reprojected ghsl_built_{label} → {output_crs} (100m)")
+                logger.info(f"  Reprojected ghsl_built_{label} → {output_crs} (100m)")
 
         if verbose:
-            print(f"  ghsl_built_{label} : {out_path}")
+            logger.info(f"  ghsl_built_{label} : {out_path}")
         results[f"ghsl_built_{label}"] = out_path
 
     return results
@@ -741,15 +553,15 @@ def get_wdpa(aoi, output_dir="data", buff=0.0, output_crs=None,
     :return: Dict with 'protected' file path.
     """
     if verbose:
-        print("=" * 60)
-        print("Downloading WDPA protected areas from GEE (vector)...")
+        logger.info("=" * 60)
+        logger.info("Downloading WDPA protected areas from GEE (vector)...")
 
     os.makedirs(output_dir, exist_ok=True)
     extent = _parse_aoi(aoi, buff)
     xmin, ymin, xmax, ymax = extent
 
     if verbose:
-        print(f"  Extent: {xmin:.4f}, {ymin:.4f}, {xmax:.4f}, {ymax:.4f}")
+        logger.info(f"  Extent: {xmin:.4f}, {ymin:.4f}, {xmax:.4f}, {ymax:.4f}")
 
     # Build bounding box and filter WDPA
     bbox = ee.Geometry.Rectangle([xmin, ymin, xmax, ymax])
@@ -770,22 +582,22 @@ def get_wdpa(aoi, output_dir="data", buff=0.0, output_crs=None,
         )
     except Exception:
         if verbose:
-            print("  Column selection failed, downloading all attributes.")
+            logger.warning("  Column selection failed, downloading all attributes.")
         wdpa_select = wdpa
 
     # Count features
     if verbose:
         count = wdpa_select.size().getInfo()
-        print(f"  Protected areas found: {count}")
+        logger.info(f"  Protected areas found: {count}")
         if count == 0:
-            print("  WARNING: No protected areas in this AOI.")
+            logger.warning("  WARNING: No protected areas in this AOI.")
             pa_path = os.path.join(output_dir, f"{_WDPA_OUTPUT_NAME}.gpkg")
             _create_empty_gpkg(pa_path, ogr.wkbMultiPolygon)
             return {_WDPA_OUTPUT_NAME: pa_path}
 
     # Download as GeoJSON via computeFeatures
     if verbose:
-        print("  Downloading features from GEE...")
+        logger.info("  Downloading features from GEE...")
 
     fc_dict = wdpa_select.getInfo()
 
@@ -805,7 +617,7 @@ def get_wdpa(aoi, output_dir="data", buff=0.0, output_crs=None,
             gdf = gpd.clip(gdf.to_crs("EPSG:4326"), aoi_gdf)
             gdf = gdf[~gdf.geometry.is_empty & gdf.geometry.notna()]
             if verbose:
-                print(f"  Clipped to AOI: {before} -> {len(gdf)} features")
+                logger.info(f"  Clipped to AOI: {before} -> {len(gdf)} features")
             os.remove(pa_path)
             if not gdf.empty:
                 gdf.to_file(pa_path, driver="GPKG")
@@ -813,7 +625,7 @@ def get_wdpa(aoi, output_dir="data", buff=0.0, output_crs=None,
                 _create_empty_gpkg(pa_path, ogr.wkbMultiPolygon)
     except Exception as e:
         if verbose:
-            print(f"  WARNING: clip step skipped ({e})")
+            logger.warning(f"  WARNING: clip step skipped ({e})")
 
     # Reproject if requested (geopandas path avoids OGR exception under gdal.UseExceptions())
     if output_crs is not None and os.path.exists(pa_path):
@@ -825,13 +637,13 @@ def get_wdpa(aoi, output_dir="data", buff=0.0, output_crs=None,
             else:
                 _create_empty_gpkg(pa_path, ogr.wkbMultiPolygon)
             if verbose:
-                print(f"  Reprojected {_WDPA_OUTPUT_NAME} → {output_crs}")
+                logger.info(f"  Reprojected {_WDPA_OUTPUT_NAME} → {output_crs}")
         except Exception as e:
             if verbose:
-                print(f"  WARNING: reprojection failed ({e}) — output stays in EPSG:4326")
+                logger.warning(f"  WARNING: reprojection failed ({e}) — output stays in EPSG:4326")
 
     if verbose:
-        print(f"  {_WDPA_OUTPUT_NAME} : {pa_path}")
+        logger.info(f"  {_WDPA_OUTPUT_NAME} : {pa_path}")
     return {_WDPA_OUTPUT_NAME: pa_path}
 
 
@@ -881,7 +693,7 @@ def _geojson_to_gpkg(fc_dict, output_path, layer_name, verbose=True):
 
     if not valid_features:
         if verbose:
-            print("  WARNING: No valid features, creating empty GPKG.")
+            logger.warning("  WARNING: No valid features, creating empty GPKG.")
         _create_empty_gpkg(output_path)
         return
 
@@ -894,7 +706,7 @@ def _geojson_to_gpkg(fc_dict, output_path, layer_name, verbose=True):
     ds_in = ogr.Open(tmp_json)
     if ds_in is None or ds_in.GetLayerCount() == 0:
         if verbose:
-            print("  WARNING: Cannot read GeoJSON, creating empty GPKG.")
+            logger.warning("  WARNING: Cannot read GeoJSON, creating empty GPKG.")
         _create_empty_gpkg(output_path)
         if os.path.exists(tmp_json):
             os.remove(tmp_json)
@@ -946,7 +758,7 @@ def _geojson_to_gpkg(fc_dict, output_path, layer_name, verbose=True):
         os.remove(tmp_json)
 
     if verbose:
-        print(f"  Written {count} features to {output_path}")
+        logger.info(f"  Written {count} features to {output_path}")
 
 
 # ============================================================
@@ -1023,7 +835,7 @@ def _big_query_layer(layer_id, bbox, timeout=180, verbose=True):
         page = data.get("features", []) or []
         features.extend(page)
         if verbose:
-            print(f"    BIG layer {layer_id}: +{len(page)} "
+            logger.info(f"    BIG layer {layer_id}: +{len(page)} "
                   f"(total {len(features)})")
         exceeded = data.get("exceededTransferLimit", False)
         if len(page) < _BIG_PAGE_SIZE and not exceeded:
@@ -1052,8 +864,8 @@ def get_rivers_big(aoi, output_dir="data", buff=0.0, output_crs=None,
     from shapely.geometry import shape
 
     if verbose:
-        print("=" * 60)
-        print("Downloading BIG RBI rivers (Layers 237 + 257)...")
+        logger.info("=" * 60)
+        logger.info("Downloading BIG RBI rivers (Layers 237 + 257)...")
 
     os.makedirs(output_dir, exist_ok=True)
     polygon = _load_aoi_polygon(aoi, buff)
@@ -1071,7 +883,7 @@ def get_rivers_big(aoi, output_dir="data", buff=0.0, output_crs=None,
 
     if not geoms:
         if verbose:
-            print("  No BIG river features in AOI — writing empty river.gpkg.")
+            logger.info("  No BIG river features in AOI — writing empty river.gpkg.")
         _create_empty_gpkg(gpkg_path, ogr.wkbLineString)
         return {"river": gpkg_path}
 
@@ -1083,7 +895,7 @@ def get_rivers_big(aoi, output_dir="data", buff=0.0, output_crs=None,
     gdf = gpd.clip(gdf, aoi_gdf)
     gdf = gdf[~gdf.geometry.is_empty & gdf.geometry.notna()]
     if verbose:
-        print(f"  Clipped to AOI: {before} -> {len(gdf)} features")
+        logger.info(f"  Clipped to AOI: {before} -> {len(gdf)} features")
 
     if gdf.empty:
         _create_empty_gpkg(gpkg_path, ogr.wkbLineString)
@@ -1097,7 +909,7 @@ def get_rivers_big(aoi, output_dir="data", buff=0.0, output_crs=None,
     gdf.to_file(gpkg_path, driver="GPKG")
 
     if verbose:
-        print(f"  {len(gdf)} features -> {gpkg_path}")
+        logger.info(f"  {len(gdf)} features -> {gpkg_path}")
     return {"river": gpkg_path}
 
 
@@ -1216,17 +1028,17 @@ def _fetch_osm_geoms(s, w, n, e, element, tag_filter, out_clause,
     if data is not None:
         geoms = _parse_osm_elements(data, want_points)
         if verbose:
-            print(f"    tile {label}: +{len(geoms)} features")
+            logger.info(f"    tile {label}: +{len(geoms)} features")
         time.sleep(1)  # be polite to shared public servers
         return geoms, 0
 
     if depth >= _OSM_MAX_SPLIT_DEPTH:
         if verbose:
-            print(f"    tile {label}: FAILED (max split depth reached)")
+            logger.warning(f"    tile {label}: FAILED (max split depth reached)")
         return [], 1
 
     if verbose:
-        print(f"    tile {label}: failed, splitting into 4 quadrants...")
+        logger.warning(f"    tile {label}: failed, splitting into 4 quadrants...")
     midx = (w + e) / 2.0
     midy = (s + n) / 2.0
     quads = (
@@ -1262,7 +1074,7 @@ def _download_osm_osmnx(name, tags, keep_geom_types,
     xmin, ymin, xmax, ymax = polygon.bounds
 
     if verbose:
-        print(f"  AOI extent: {xmax - xmin:.2f} x {ymax - ymin:.2f} deg")
+        logger.info(f"  AOI extent: {xmax - xmin:.2f} x {ymax - ymin:.2f} deg")
 
     # Point features (towns) come from nodes; lines (roads/rivers) from ways.
     want_points = "Point" in keep_geom_types
@@ -1273,7 +1085,7 @@ def _download_osm_osmnx(name, tags, keep_geom_types,
 
     tiles = list(_osm_tiles(xmin, ymin, xmax, ymax))
     if verbose:
-        print(f"  Querying Overpass in {len(tiles)} tile(s)...")
+        logger.info(f"  Querying Overpass in {len(tiles)} tile(s)...")
 
     geoms = []
     failed = 0
@@ -1285,11 +1097,11 @@ def _download_osm_osmnx(name, tags, keep_geom_types,
         failed += f
 
     if failed and verbose:
-        print(f"  WARNING: {failed} sub-tile(s) failed after splitting — output may be incomplete.")
+        logger.warning(f"  WARNING: {failed} sub-tile(s) failed after splitting — output may be incomplete.")
 
     if not geoms:
         if verbose:
-            print(f"  No {name} features found.")
+            logger.info(f"  No {name} features found.")
         return {}
 
     gdf = gpd.GeoDataFrame(geometry=geoms, crs="EPSG:4326")
@@ -1301,11 +1113,11 @@ def _download_osm_osmnx(name, tags, keep_geom_types,
     gdf = gdf[~gdf.geometry.is_empty & gdf.geometry.notna()]
     gdf = gdf[gdf.geometry.geom_type.isin(keep_geom_types)]
     if verbose:
-        print(f"  Clipped to AOI: {before} -> {len(gdf)} features")
+        logger.info(f"  Clipped to AOI: {before} -> {len(gdf)} features")
 
     if gdf.empty:
         if verbose:
-            print(f"  No {name} features inside AOI.")
+            logger.info(f"  No {name} features inside AOI.")
         return {}
 
     if output_crs is not None:
@@ -1317,7 +1129,7 @@ def _download_osm_osmnx(name, tags, keep_geom_types,
     gdf.to_file(gpkg_path, driver="GPKG")
 
     if verbose:
-        print(f"  {len(gdf)} features -> {gpkg_path}")
+        logger.info(f"  {len(gdf)} features -> {gpkg_path}")
     return {name: gpkg_path}
 
 
@@ -1334,8 +1146,8 @@ def get_roads(aoi, output_dir="data", buff=0.0, output_crs=None,
     :return: Dict with 'road' file path (or empty dict if no features).
     """
     if verbose:
-        print("=" * 60)
-        print("Downloading OSM roads...")
+        logger.info("=" * 60)
+        logger.info("Downloading OSM roads...")
     return _download_osm_osmnx(
         "road", OSM_ROAD_TAGS, ["LineString", "MultiLineString"],
         aoi, output_dir, buff, output_crs, timeout, verbose,
@@ -1355,8 +1167,8 @@ def get_rivers(aoi, output_dir="data", buff=0.0, output_crs=None,
     :return: Dict with 'river' file path (or empty dict if no features).
     """
     if verbose:
-        print("=" * 60)
-        print("Downloading OSM rivers...")
+        logger.info("=" * 60)
+        logger.info("Downloading OSM rivers...")
     return _download_osm_osmnx(
         "river", OSM_RIVER_TAGS, ["LineString", "MultiLineString"],
         aoi, output_dir, buff, output_crs, timeout, verbose,
@@ -1376,8 +1188,8 @@ def get_towns(aoi, output_dir="data", buff=0.0, output_crs=None,
     :return: Dict with 'town' file path (or empty dict if no features).
     """
     if verbose:
-        print("=" * 60)
-        print("Downloading OSM towns/settlements...")
+        logger.info("=" * 60)
+        logger.info("Downloading OSM towns/settlements...")
     return _download_osm_osmnx(
         "town", OSM_TOWN_TAGS, ["Point"],
         aoi, output_dir, buff, output_crs, timeout, verbose,
@@ -1405,8 +1217,8 @@ def get_osm(aoi, output_dir="data", buff=0.0, output_crs=None,
     :return: Dict with 'road', 'river', 'town' file paths.
     """
     if verbose:
-        print("=" * 60)
-        print("Downloading OSM vector data (roads + rivers + towns)...")
+        logger.info("=" * 60)
+        logger.info("Downloading OSM vector data (roads + rivers + towns)...")
 
     kwargs = dict(
         output_dir=output_dir, buff=buff, output_crs=output_crs,
@@ -1468,12 +1280,12 @@ def get_variables(aoi, output_dir="data", buff=0.0,
     """
     crs_label = output_crs if output_crs else "EPSG:4326"
     if verbose:
-        print("=" * 60)
-        print("VARIABLE DOWNLOADER")
-        print(f"  AOI        : {aoi}")
-        print(f"  Output dir : {output_dir}")
-        print(f"  Output CRS : {crs_label}")
-        print("=" * 60)
+        logger.info("=" * 60)
+        logger.info("VARIABLE DOWNLOADER")
+        logger.info(f"  AOI        : {aoi}")
+        logger.info(f"  Output dir : {output_dir}")
+        logger.info(f"  Output CRS : {crs_label}")
+        logger.info("=" * 60)
 
     os.makedirs(output_dir, exist_ok=True)
     result = {}
@@ -1515,14 +1327,14 @@ def get_variables(aoi, output_dir="data", buff=0.0,
 
     # Summary
     if verbose:
-        print("=" * 60)
-        print("ALL DATA DOWNLOADED")
-        print(f"  CRS: {crs_label}")
+        logger.info("=" * 60)
+        logger.info("ALL DATA DOWNLOADED")
+        logger.info(f"  CRS: {crs_label}")
         for name, path in result.items():
             ext = os.path.splitext(path)[1]
             fmt = "raster" if ext == ".tif" else "vector"
-            print(f"  {name:12s} : {path}  ({fmt})")
-        print("=" * 60)
+            logger.info(f"  {name:12s} : {path}  ({fmt})")
+        logger.info("=" * 60)
 
     return result
 
@@ -1583,13 +1395,13 @@ def download_variables(ctx: RunContext, use_cache: bool = True) -> dict:
             for _f in _cache_d.iterdir():
                 if _f.name != "metadata.json":
                     shutil.copy2(_f, out_dir / _f.name)
-            print("Variables: loaded from cross-run cache.")
+            logger.info("Variables: loaded from cross-run cache.")
             return {}
         else:
-            print("Variables: cache hit but files incomplete, re-downloading.")
+            logger.info("Variables: cache hit but files incomplete, re-downloading.")
 
     if use_cache and _variables_complete(out_dir, cfg):
-        print("Variables: all outputs already present in run folder, skipping.")
+        logger.info("Variables: all outputs already present in run folder, skipping.")
         return {}
 
     # aoi_buffer is in metres; individual getters expect degrees
@@ -1620,7 +1432,7 @@ def download_variables(ctx: RunContext, use_cache: bool = True) -> dict:
     if not (out_dir / "altitude.tif").exists() or not (out_dir / "slope.tif").exists():
         result.update(get_srtm(**gee_kwargs))
     else:
-        print("Variables: altitude + slope already present, skipping SRTM.")
+        logger.info("Variables: altitude + slope already present, skipping SRTM.")
 
     # WDPA — skip if present
     if not (out_dir / f"{_WDPA_OUTPUT_NAME}.gpkg").exists():
@@ -1629,20 +1441,20 @@ def download_variables(ctx: RunContext, use_cache: bool = True) -> dict:
             output_crs=cfg.crs, verbose=True,
         ))
     else:
-        print(f"Variables: {_WDPA_OUTPUT_NAME}.gpkg already present, skipping WDPA.")
+        logger.info(f"Variables: {_WDPA_OUTPUT_NAME}.gpkg already present, skipping WDPA.")
 
     # Roads — skip if present
     if not (out_dir / "road.gpkg").exists():
         result.update(get_roads(**osm_kwargs))
     else:
-        print("Variables: road.gpkg already present, skipping roads.")
+        logger.info("Variables: road.gpkg already present, skipping roads.")
 
     # Rivers — source-dependent: user file (ingested separately), BIG RBI, or OSM
     if cfg.river_source == "user":
-        print("Variables: river.source=user — river ingested from user_inputs, "
+        logger.info("Variables: river.source=user — river ingested from user_inputs, "
               "skipping download.")
     elif (out_dir / "river.gpkg").exists():
-        print("Variables: river.gpkg already present, skipping rivers.")
+        logger.info("Variables: river.gpkg already present, skipping rivers.")
     elif cfg.river_source == "big":
         result.update(get_rivers_big(**osm_kwargs))
     else:  # "osm"
@@ -1651,7 +1463,7 @@ def download_variables(ctx: RunContext, use_cache: bool = True) -> dict:
     # Plantation — only when source=download (user source is ingested separately)
     if cfg.plantation_source == "download":
         if (out_dir / "plantation_t2.tif").exists() and (out_dir / "plantation_t3.tif").exists():
-            print("Variables: plantation_t2/t3.tif already present, skipping plantation.")
+            logger.info("Variables: plantation_t2/t3.tif already present, skipping plantation.")
         else:
             from palmdef_risk.data.plantation import get_plantation_descals
             result.update(get_plantation_descals(
@@ -1679,12 +1491,12 @@ def download_variables(ctx: RunContext, use_cache: bool = True) -> dict:
                 parallel=True, max_retries=3, verbose=True,
             ))
         else:
-            print("Variables: ghsl_built_t2/t3.tif already present, skipping GHSL.")
+            logger.info("Variables: ghsl_built_t2/t3.tif already present, skipping GHSL.")
     else:
         if not (out_dir / "town.gpkg").exists():
             result.update(get_towns(**osm_kwargs))
         else:
-            print("Variables: town.gpkg already present, skipping towns.")
+            logger.info("Variables: town.gpkg already present, skipping towns.")
 
     _cache_d = _cm.variables_dir(_vkey)
     _cache_d.mkdir(parents=True, exist_ok=True)

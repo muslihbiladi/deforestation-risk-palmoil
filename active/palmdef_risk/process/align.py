@@ -15,8 +15,9 @@ from palmdef_risk.io.run import RunContext
 from palmdef_risk.io.helpers import (
     get_mask_properties, reproject_raster, reproject_raster_to_match,
     reproject_vector, rasterize_vector, apply_mask, apply_mask_float,
-    remove_if_exists, get_pixel_size_m,
+    remove_if_exists, get_pixel_size_m, raster_shape as _raster_shape,
 )
+from palmdef_risk.constants import NODATA_BYTE, NODATA_FLOAT, GTIFF_OPTS
 
 log = logging.getLogger(__name__)
 
@@ -64,7 +65,7 @@ def _ensure_forest_utm(ctx: RunContext) -> None:
         log.info("  Reprojected raw forest: %s → %s", fname, ctx.config.crs)
 
 
-def _remap_srtm_voids(path: str, nodata: float = -9999.0) -> None:
+def _remap_srtm_voids(path: str, nodata: float = NODATA_FLOAT) -> None:
     """Replace SRTM void sentinel (-32768) that leaks through bilinear reprojection."""
     ds = gdal.Open(path, gdal.GA_Update)
     arr = ds.GetRasterBand(1).ReadAsArray().astype(np.float32)
@@ -113,14 +114,6 @@ def align_all(ctx: RunContext, inputs: dict | None = None, force: bool = False) 
 
     Returns dict mapping variable names to aligned raster paths in ctx.data_dir.
     """
-    def _raster_shape(p: Path):
-        ds = gdal.Open(str(p))
-        if ds is None:
-            return None
-        s = (ds.RasterYSize, ds.RasterXSize)
-        ds = None
-        return s
-
     def _skip(p: Path, src: Path | None = None) -> bool:
         if not force and p.exists():
             if src is not None and src.exists():
@@ -191,7 +184,7 @@ def align_all(ctx: RunContext, inputs: dict | None = None, force: bool = False) 
             if not _skip(out):
                 reproject_raster_to_match(str(raw_path), str(out), mask_props,
                                           resample_alg="bilinear")
-                apply_mask_float(str(out), mask_props["invalid_mask"])
+                apply_mask_float(str(out), mask_props["ref_path"])
                 if name == "altitude":
                     _remap_srtm_voids(str(out))
             result[name] = out
@@ -208,7 +201,7 @@ def align_all(ctx: RunContext, inputs: dict | None = None, force: bool = False) 
                 proj_vec = ctx.data_dir / "intermediate" / f"{name}_proj.gpkg"
                 vec_to_burn = reproject_vector(str(vec_path), str(proj_vec), mask_props["srs"])
                 rasterize_vector(str(vec_to_burn), str(out), burn, mask_props)
-                apply_mask(str(out), mask_props["invalid_mask"])
+                apply_mask(str(out), mask_props["ref_path"])
             result[name] = out
 
     # 4. Peatland — branch on type
@@ -220,11 +213,11 @@ def align_all(ctx: RunContext, inputs: dict | None = None, force: bool = False) 
                 proj_peat = ctx.data_dir / "intermediate" / "peatland_proj.gpkg"
                 peat_to_burn = reproject_vector(str(peat_src), str(proj_peat), mask_props["srs"])
                 rasterize_vector(str(peat_to_burn), str(out), 1, mask_props)
-                apply_mask(str(out), mask_props["invalid_mask"])
+                apply_mask(str(out), mask_props["ref_path"])
             else:
                 reproject_raster_to_match(str(peat_src), str(out), mask_props,
                                           resample_alg="bilinear")
-                apply_mask_float(str(out), mask_props["invalid_mask"])
+                apply_mask_float(str(out), mask_props["ref_path"])
         result["peatland"] = out
 
     # 5. HGU signed-distance raster
@@ -254,10 +247,13 @@ def align_all(ctx: RunContext, inputs: dict | None = None, force: bool = False) 
             merge_plantation(str(plant_src), str(merged),
                              ctx.config.plantation_industrial_value,
                              ctx.config.plantation_smallholder_value)
+            # Plantation is categorical (binary presence after merge). When the
+            # source is finer than the reference grid, "mode" (majority) is the
+            # correct downsampling — "near" would pick an arbitrary source pixel.
             reproject_raster_to_match(str(merged), str(out), mask_props,
-                                      resample_alg="near",
+                                      resample_alg="mode",
                                       output_dtype=gdalconst.GDT_Byte)
-            apply_mask(str(out), mask_props["invalid_mask"])
+            apply_mask(str(out), mask_props["ref_path"])
         result[res_key] = out
 
     # 7. Mill — rasterize presence raster
@@ -268,7 +264,7 @@ def align_all(ctx: RunContext, inputs: dict | None = None, force: bool = False) 
             proj_mill = ctx.data_dir / "intermediate" / "mill_proj.gpkg"
             mill_to_burn = reproject_vector(str(mill_gpkg), str(proj_mill), mask_props["srs"])
             rasterize_vector(str(mill_to_burn), str(out), 1, mask_props)
-            apply_mask(str(out), mask_props["invalid_mask"])
+            apply_mask(str(out), mask_props["ref_path"])
         result["mill"] = out
 
     return result
@@ -296,16 +292,16 @@ def merge_plantation(
     merged = np.where(
         (arr == industrial_value) | (arr == smallholder_value), 1, 0
     ).astype(np.uint8)
-    merged[nodata_mask] = 255
+    merged[nodata_mask] = NODATA_BYTE
 
     ny, nx = merged.shape
     driver = gdal.GetDriverByName("GTiff")
     out_ds = driver.Create(str(dst_path), nx, ny, 1, gdal.GDT_Byte,
-                           ["COMPRESS=DEFLATE", "TILED=YES"])
+                           GTIFF_OPTS)
     out_ds.SetGeoTransform(gt)
     out_ds.SetProjection(proj)
     out_ds.GetRasterBand(1).WriteArray(merged)
-    out_ds.GetRasterBand(1).SetNoDataValue(255)
+    out_ds.GetRasterBand(1).SetNoDataValue(NODATA_BYTE)
     out_ds.FlushCache()
     out_ds = None
     return Path(dst_path)
@@ -354,12 +350,12 @@ def compute_hgu_signed_distance(
     drv = gdal.GetDriverByName("GTiff")
     out_ds = drv.Create(
         str(out_tif), nx, ny, 1, gdal.GDT_Float32,
-        options=["COMPRESS=LZW", "TILED=YES"],
+        options=GTIFF_OPTS,
     )
     out_ds.SetGeoTransform(gt)
     out_ds.SetProjection(proj)
     out_ds.GetRasterBand(1).WriteArray(signed)
-    out_ds.GetRasterBand(1).SetNoDataValue(-9999.0)
+    out_ds.GetRasterBand(1).SetNoDataValue(NODATA_FLOAT)
     out_ds.FlushCache()
     out_ds = None
     Path(str(hgu_mask_path)).unlink(missing_ok=True)

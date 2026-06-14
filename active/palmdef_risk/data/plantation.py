@@ -37,6 +37,7 @@ import numpy as np
 from osgeo import gdal
 
 from palmdef_risk.data.variables import _parse_aoi, _clip_to_vector, _reproject_raster
+from palmdef_risk.constants import NODATA_BYTE, GTIFF_OPTS
 
 gdal.UseExceptions()
 log = logging.getLogger(__name__)
@@ -57,7 +58,7 @@ _UA = "palmdef_risk/1.0 (deforestation risk research; +https://www.wri.org)"
 
 def accumulate_classes(extent, yop, year, industrial_value=1,
                        smallholder_value=2, yop_min=_YOP_MIN, yop_max=_YOP_MAX,
-                       nodata=255):
+                       nodata=NODATA_BYTE):
     """Cumulative plantation class array up to `year`.
 
     Keep the extent class (industrial/smallholder) only where the pixel was
@@ -205,7 +206,7 @@ def _clip_vrt_to_bbox(vrt_path, out_path, bbox, width=None, height=None,
     opts = dict(
         format="GTiff", outputBounds=list(bbox),
         resampleAlg=resample_map.get(resample, gdal.GRA_NearestNeighbour),
-        creationOptions=["COMPRESS=DEFLATE", "TILED=YES"],
+        creationOptions=GTIFF_OPTS,
     )
     if width is not None and height is not None:
         opts["width"] = width
@@ -258,11 +259,11 @@ def _build_year_raster(extent_vrt, yop_vrt, aoi, year, out_path,
     acc_4326 = os.path.join(work_dir, "_acc_4326.tif")
     drv = gdal.GetDriverByName("GTiff")
     ds = drv.Create(acc_4326, nx, ny, 1, gdal.GDT_Byte,
-                    ["COMPRESS=DEFLATE", "TILED=YES"])
+                    GTIFF_OPTS)
     ds.SetGeoTransform(gt)
     ds.SetProjection(proj)
     ds.GetRasterBand(1).WriteArray(out_arr)
-    ds.GetRasterBand(1).SetNoDataValue(255)
+    ds.GetRasterBand(1).SetNoDataValue(NODATA_BYTE)
     ds.FlushCache()
     ds = None
 
@@ -271,13 +272,13 @@ def _build_year_raster(extent_vrt, yop_vrt, aoi, year, out_path,
     src = acc_4326
     if aoi_is_vector:
         clipped = os.path.join(work_dir, "_acc_clip.tif")
-        _clip_to_vector(acc_4326, clipped, str(aoi), nodata=255)
+        _clip_to_vector(acc_4326, clipped, str(aoi), nodata=NODATA_BYTE)
         src = clipped
 
     # 6. Reproject to run CRS (native resolution) or keep EPSG:4326.
     if output_crs is not None:
         _reproject_raster(src, out_path, dst_crs=output_crs,
-                          resampling="near", nodata=255)
+                          resampling="near", nodata=NODATA_BYTE)
     else:
         os.replace(src, out_path)
 
