@@ -247,8 +247,11 @@ def align_all(ctx: RunContext, inputs: dict | None = None, force: bool = False) 
             merge_plantation(str(plant_src), str(merged),
                              ctx.config.plantation_industrial_value,
                              ctx.config.plantation_smallholder_value)
+            # Plantation is categorical (binary presence after merge). When the
+            # source is finer than the reference grid, "mode" (majority) is the
+            # correct downsampling — "near" would pick an arbitrary source pixel.
             reproject_raster_to_match(str(merged), str(out), mask_props,
-                                      resample_alg="near",
+                                      resample_alg="mode",
                                       output_dtype=gdalconst.GDT_Byte)
             apply_mask(str(out), mask_props["ref_path"])
         result[res_key] = out

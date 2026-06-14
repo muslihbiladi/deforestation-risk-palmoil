@@ -169,6 +169,51 @@ def test_protected_filename_constant():
     assert _PROTECTED_FILENAME == "protected"
 
 
+def test_plantation_downsample_uses_mode_not_near(tmp_path):
+    """Categorical plantation must downsample by majority (mode), not near.
+
+    A 4x4 binary source is aligned to a 2x2 reference (2:1 downsample). In the
+    top-left 2x2 block the majority class is 1 ([[1,1],[1,0]]), but GDAL's
+    nearest-neighbour samples the single 0 pixel — so "mode" and "near" disagree
+    there, and "mode" gives the spec-correct majority.
+    """
+    from palmdef_risk.io.helpers import get_mask_properties, reproject_raster_to_match
+    from tests.conftest import _write_raster
+
+    # Coarse reference grid: 2x2 @ 60 m (UTM 50S) — source below is finer (30 m).
+    ref = _write_raster(tmp_path / "ref.tif", np.ones((2, 2), dtype=np.uint8),
+                        gt=[500000, 60, 0, 9000000, 0, -60], epsg=32750,
+                        dtype=gdal.GDT_Byte, nodata=255)
+
+    # Fine 4x4 @ 30 m binary source. Top-left block majority = 1, near-pixel = 0.
+    fine_arr = np.array([
+        [1, 1, 1, 1],
+        [1, 0, 1, 1],
+        [0, 0, 0, 0],
+        [0, 0, 0, 0],
+    ], dtype=np.uint8)
+    fine = _write_raster(tmp_path / "fine.tif", fine_arr,
+                         gt=[500000, 30, 0, 9000000, 0, -30], epsg=32750,
+                         dtype=gdal.GDT_Byte, nodata=255)
+
+    mask_props = get_mask_properties(str(ref))
+    out_mode = tmp_path / "mode.tif"
+    out_near = tmp_path / "near.tif"
+    reproject_raster_to_match(str(fine), str(out_mode), mask_props,
+                              resample_alg="mode", output_dtype=gdal.GDT_Byte)
+    reproject_raster_to_match(str(fine), str(out_near), mask_props,
+                              resample_alg="near", output_dtype=gdal.GDT_Byte)
+
+    mode_arr, _ = _read(out_mode)
+    near_arr, _ = _read(out_near)
+
+    # mode = per-cell majority class.
+    assert np.array_equal(mode_arr, np.array([[1, 1], [0, 0]], dtype=np.uint8))
+    # mode and near disagree (top-left): near sampled the minority 0 pixel.
+    assert not np.array_equal(mode_arr, near_arr)
+    assert mode_arr[0, 0] == 1 and near_arr[0, 0] == 0
+
+
 def test_hgu_signed_distance_negative_inside(tmp_path, write_raster):
     from palmdef_risk.process.align import compute_hgu_signed_distance
     import numpy as np
