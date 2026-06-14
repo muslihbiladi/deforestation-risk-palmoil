@@ -9,16 +9,9 @@ from osgeo import gdal
 if TYPE_CHECKING:
     from palmdef_risk.io.run import RunContext
 
+from palmdef_risk.io.helpers import raster_shape as _raster_shape
+
 logger = logging.getLogger(__name__)
-
-
-def _raster_shape(path: Path):
-    ds = gdal.Open(str(path))
-    if ds is None:
-        return None
-    s = (ds.RasterYSize, ds.RasterXSize)
-    ds = None
-    return s
 
 
 def _needs_recompute(out_path: Path, ref_shape: tuple) -> bool:

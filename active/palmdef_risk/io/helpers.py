@@ -37,6 +37,20 @@ def aoi_bbox_4326(aoi_source: str) -> tuple:
     return (xmin, ymin, xmax, ymax)
 
 
+def raster_shape(path):
+    """Return (rows, cols) for a raster, or None if it cannot be opened.
+
+    Single source for the shape-mismatch resumability checks in the process
+    stage (align / distances / gravity), which each used to define this locally.
+    """
+    ds = gdal.Open(str(path))
+    if ds is None:
+        return None
+    shape = (ds.RasterYSize, ds.RasterXSize)
+    ds = None
+    return shape
+
+
 # ============================================================
 # WORKSPACE UTILITIES
 # ============================================================

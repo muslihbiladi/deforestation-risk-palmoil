@@ -15,7 +15,7 @@ from palmdef_risk.io.run import RunContext
 from palmdef_risk.io.helpers import (
     get_mask_properties, reproject_raster, reproject_raster_to_match,
     reproject_vector, rasterize_vector, apply_mask, apply_mask_float,
-    remove_if_exists, get_pixel_size_m,
+    remove_if_exists, get_pixel_size_m, raster_shape as _raster_shape,
 )
 
 log = logging.getLogger(__name__)
@@ -113,14 +113,6 @@ def align_all(ctx: RunContext, inputs: dict | None = None, force: bool = False) 
 
     Returns dict mapping variable names to aligned raster paths in ctx.data_dir.
     """
-    def _raster_shape(p: Path):
-        ds = gdal.Open(str(p))
-        if ds is None:
-            return None
-        s = (ds.RasterYSize, ds.RasterXSize)
-        ds = None
-        return s
-
     def _skip(p: Path, src: Path | None = None) -> bool:
         if not force and p.exists():
             if src is not None and src.exists():

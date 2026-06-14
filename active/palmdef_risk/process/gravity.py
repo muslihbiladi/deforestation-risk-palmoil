@@ -10,6 +10,8 @@ from scipy.signal import oaconvolve
 if TYPE_CHECKING:
     from palmdef_risk.io.run import RunContext
 
+from palmdef_risk.io.helpers import raster_shape as _raster_shape
+
 logger = logging.getLogger(__name__)
 
 
@@ -208,15 +210,6 @@ def _rasterize_points_numpy(points_gpkg: Path, ref_path: Path, out_path: Path) -
     out_ds.FlushCache()
     out_ds = None
     return n_burned
-
-
-def _raster_shape(path: Path):
-    ds = gdal.Open(str(path))
-    if ds is None:
-        return None
-    shape = (ds.RasterYSize, ds.RasterXSize)
-    ds = None
-    return shape
 
 
 def _is_zero_raster(path: Path) -> bool:
