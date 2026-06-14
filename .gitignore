@@ -1,24 +1,22 @@
 .claude/
 .understand-anything/
 .vscode/
+.venv/
 cache/
 docs/
 notes/
-notebook_outputs/
-runs/
 palmdef_risk.egg-info/
 __pycache__/
 *.pyc
 
-# datasets (pipeline data now lives under active/data/)
-active/data/**/*.gpkg
-active/data/**/*.tif
-active/data/**/*.tiff
-active/data/**/*.shp
-active/data/**/*.shx
-active/data/**/*.dbf
-active/data/**/*.prj
-active/data/**/*.geojson
-active/data/**/*.csv
-active/data/**/*.parquet
-active/data/**/*.nc
+# run artifacts & caches
+active/cache/
+active/runs/
+active/notebook_outputs/
+
+# data files (user-supplied + downloaded)
+active/data/
+
+# instance configs (keep schema.json + template.yaml)
+active/configs/*.yaml
+!active/configs/template.yaml
