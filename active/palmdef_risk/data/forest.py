@@ -792,6 +792,35 @@ def get_fcc(
 from palmdef_risk.io.run import RunContext
 
 
+def _forest_outputs(years) -> list[str]:
+    """Filenames get_fcc() produces for a run with these ``years``.
+
+    forest_cover.tif + one band per year (forest_t1..N) + the FCC trajectory
+    raster (fcc<1..N>.tif) + one period raster per consecutive pair
+    (fcc12.tif, fcc23.tif, ...). For N=2 the trajectory and the single period
+    raster share the name fcc12.tif (the duplicate is harmless).
+    """
+    n = len(years)
+    names = ["forest_cover.tif"]
+    names += [f"forest_t{i}.tif" for i in range(1, n + 1)]
+    names.append("fcc" + "".join(str(i) for i in range(1, n + 1)) + ".tif")
+    names += [f"fcc{i}{i + 1}.tif" for i in range(1, n)]
+    return names
+
+
+def _forest_complete(out_dir, years) -> bool:
+    """True only when every get_fcc output exists and is non-empty.
+
+    A partial download (e.g. only fcc23.tif present) must NOT be treated as
+    done — that would let align fail later with a cryptic missing-raster error.
+    """
+    for name in _forest_outputs(years):
+        p = out_dir / name
+        if not p.exists() or p.stat().st_size == 0:
+            return False
+    return True
+
+
 def download_forest(ctx: RunContext, use_cache: bool = True) -> dict:
     """Download forest cover change data for this run.
 
@@ -819,7 +848,7 @@ def download_forest(ctx: RunContext, use_cache: bool = True) -> dict:
         logger.info("Forest: loaded from cross-run cache.")
         return {"forest_cover": str(out_dir / "forest_cover.tif")}
 
-    if use_cache and (out_dir / "fcc23.tif").exists():
+    if use_cache and _forest_complete(out_dir, cfg.forest_years):
         logger.info("Forest: outputs already present in run folder, skipping.")
         return {"forest_cover": str(out_dir / "forest_cover.tif")}
 

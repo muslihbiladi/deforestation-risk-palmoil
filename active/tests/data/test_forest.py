@@ -102,3 +102,41 @@ def test_download_forest_passes_output_crs(minimal_config_yaml, tmp_path):
         assert captured.get("output_crs") == ctx.config.crs, (
             f"output_crs={captured.get('output_crs')} but expected {ctx.config.crs}"
         )
+
+
+def test_forest_outputs_three_years():
+    from palmdef_risk.data.forest import _forest_outputs
+    assert _forest_outputs([2015, 2020, 2024]) == [
+        "forest_cover.tif",
+        "forest_t1.tif", "forest_t2.tif", "forest_t3.tif",
+        "fcc123.tif", "fcc12.tif", "fcc23.tif",
+    ]
+
+
+def test_forest_complete_requires_full_set(tmp_path):
+    """A partial download (only fcc23.tif) is NOT 'done'; the full set is."""
+    from palmdef_risk.data.forest import _forest_complete, _forest_outputs
+    years = [2015, 2020, 2024]
+    out = tmp_path / "forest"
+    out.mkdir()
+
+    # Only the former guard file present → must report 'not done' so it re-runs.
+    (out / "fcc23.tif").write_bytes(b"x")
+    assert _forest_complete(out, years) is False
+
+    # Full set, all non-empty → done.
+    for name in _forest_outputs(years):
+        (out / name).write_bytes(b"x")
+    assert _forest_complete(out, years) is True
+
+
+def test_forest_complete_rejects_empty_file(tmp_path):
+    """A zero-byte output counts as incomplete (interrupted write)."""
+    from palmdef_risk.data.forest import _forest_complete, _forest_outputs
+    years = [2015, 2020, 2024]
+    out = tmp_path / "forest"
+    out.mkdir()
+    for name in _forest_outputs(years):
+        (out / name).write_bytes(b"x")
+    (out / "forest_t2.tif").write_bytes(b"")   # truncated → incomplete
+    assert _forest_complete(out, years) is False
