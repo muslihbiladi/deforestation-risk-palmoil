@@ -4,6 +4,7 @@ import pandas as pd
 from pathlib import Path
 from unittest.mock import patch, MagicMock
 import pickle
+from osgeo import gdal
 
 
 _PREDICT_FORMULA = "I(1 - fcc23) + trial ~ scale(altitude) + protected + cell"
@@ -347,6 +348,93 @@ def test_build_forecast_vardir_copies_statics(tmp_path, write_raster,
     for name in ["altitude.tif", "slope.tif", "dist_road.tif", "dist_river.tif",
                  "protected.tif", "hgu_signed_dist.tif"]:
         assert (fcast / name).exists(), f"static not copied: {name}"
+
+
+def _write_tiled(path, arr, dtype, nodata, block=16):
+    """Small-block TILED GeoTIFF so derived-raster windowing hits partial blocks."""
+    from osgeo import gdal, osr
+    drv = gdal.GetDriverByName("GTiff")
+    ny, nx = arr.shape
+    ds = drv.Create(
+        str(path), nx, ny, 1, dtype,
+        options=["TILED=YES", f"BLOCKXSIZE={block}", f"BLOCKYSIZE={block}"],
+    )
+    ds.SetGeoTransform([500000, 30, 0, 9000000, 0, -30])
+    srs = osr.SpatialReference()
+    srs.ImportFromEPSG(32750)
+    ds.SetProjection(srs.ExportToWkt())
+    b = ds.GetRasterBand(1)
+    b.WriteArray(arr)
+    b.SetNoDataValue(nodata)
+    ds.FlushCache()
+    ds = None
+    return path
+
+
+def _read_arr(path):
+    from osgeo import gdal
+    ds = gdal.Open(str(path))
+    arr = ds.GetRasterBand(1).ReadAsArray()
+    nd = ds.GetRasterBand(1).GetNoDataValue()
+    ds = None
+    return arr, nd
+
+
+def test_create_log_dist_rasters_windowed_matches_full(tmp_path):
+    """Windowed log_dist raster is bit-identical to the full-array log(x+1) path."""
+    from palmdef_risk.model.predict import _create_log_dist_rasters
+
+    src = (np.arange(70 * 70).reshape(70, 70).astype(np.float32) + 1.0) * 3.0
+    src[0, :] = -9999.0          # nodata edge
+    src[33:38, 10:25] = -9999.0  # nodata block spanning tile edges
+    _write_tiled(tmp_path / "dist_road.tif", src, gdal.GDT_Float32, -9999.0)
+
+    formula = "I(1 - fcc23) + trial ~ scale(log_dist_road) + cell"
+    _create_log_dist_rasters(tmp_path, formula)
+
+    got, nd = _read_arr(tmp_path / "log_dist_road.tif")
+
+    expected = np.full((70, 70), -9999.0, dtype=np.float32)
+    valid = src != -9999.0
+    expected[valid] = np.log(src[valid] + 1)
+    assert np.array_equal(got, expected)
+    assert nd == -9999.0
+
+
+def test_create_hgu_spline_rasters_windowed_matches_full(tmp_path):
+    """Windowed cr() spline basis rasters are bit-identical to whole-raster eval."""
+    from patsy import dmatrix, build_design_matrices
+    from palmdef_risk.model.predict import _create_hgu_spline_rasters
+
+    # sample.csv drives the memorized cr() knots.
+    rng = np.random.default_rng(7)
+    hgu_train = rng.uniform(-8000, 8000, 400)
+    pd.DataFrame({"hgu_signed_dist": hgu_train}).to_csv(tmp_path / "sample.csv", index=False)
+
+    src = np.linspace(-8000, 8000, 70 * 70).reshape(70, 70).astype(np.float32)
+    src[1, :] = -9999.0
+    src[40:44, 5:30] = -9999.0
+    _write_tiled(tmp_path / "hgu_signed_dist.tif", src, gdal.GDT_Float32, -9999.0)
+
+    formula = "I(1 - fcc23) + trial ~ hgu_b1 + hgu_b2 + cell"
+    _create_hgu_spline_rasters(tmp_path, formula, tmp_path / "sample.csv")
+
+    # Baseline: the pre-refactor whole-raster evaluation.
+    design_info = dmatrix(
+        "cr(x, knots=(-5000, 0, 5000)) - 1", {"x": hgu_train}, return_type="matrix"
+    ).design_info
+    n_basis = len(design_info.column_names)
+    arr = src.astype(np.float64)
+    valid = arr != -9999.0
+    basis = np.asarray(build_design_matrices([design_info], {"x": arr[valid].ravel()})[0])
+
+    for i, name in enumerate(("hgu_b1", "hgu_b2")):
+        col_idx = min(i, n_basis - 1)
+        expected = np.full((70, 70), -9999.0, dtype=np.float32)
+        expected[valid] = basis[:, col_idx].astype(np.float32)
+        got, nd = _read_arr(tmp_path / f"{name}.tif")
+        assert np.array_equal(got, expected), f"{name} mismatch"
+        assert nd == -9999.0
 
 
 def test_predict_forecast_skips_when_covariates_missing(tmp_path, write_raster,

@@ -63,25 +63,35 @@ def _create_log_dist_rasters(data_dir: Path, formula: str) -> None:
             logger.warning("Source raster missing, cannot create %s", log_path.name)
             continue
 
+        # Stream the elementwise log transform over GDAL blocks: read → log →
+        # write per window so a full source + full result never coexist in RAM.
+        # Bit-identical to the prior full-array path (float32 in, log(x+1) out).
         ds = gdal.Open(str(src_path))
         band = ds.GetRasterBand(1)
         nodata = band.GetNoDataValue()
-        arr = band.ReadAsArray().astype(np.float32)
-
-        out_arr = np.full_like(arr, -9999.0)
-        valid = arr != nodata if nodata is not None else np.ones_like(arr, dtype=bool)
-        out_arr[valid] = np.log(arr[valid] + 1)
+        nx, ny = band.XSize, band.YSize
+        bx, by = band.GetBlockSize()
 
         drv = gdal.GetDriverByName("GTiff")
         out_ds = drv.Create(
-            str(log_path), ds.RasterXSize, ds.RasterYSize, 1,
+            str(log_path), nx, ny, 1,
             gdal.GDT_Float32, ["COMPRESS=LZW", "TILED=YES"],
         )
         out_ds.SetGeoTransform(ds.GetGeoTransform())
         out_ds.SetProjection(ds.GetProjection())
         out_band = out_ds.GetRasterBand(1)
-        out_band.WriteArray(out_arr)
         out_band.SetNoDataValue(-9999.0)
+
+        for yoff in range(0, ny, by):
+            ywin = min(by, ny - yoff)
+            for xoff in range(0, nx, bx):
+                xwin = min(bx, nx - xoff)
+                blk = band.ReadAsArray(xoff, yoff, xwin, ywin).astype(np.float32)
+                out_blk = np.full((ywin, xwin), -9999.0, dtype=np.float32)
+                valid = (blk != nodata) if nodata is not None else np.ones_like(blk, dtype=bool)
+                out_blk[valid] = np.log(blk[valid] + 1)
+                out_band.WriteArray(out_blk, xoff, yoff)
+
         out_band.FlushCache()
         out_ds = None
         ds = None
@@ -95,12 +105,14 @@ def _create_hgu_spline_rasters(data_dir: Path, formula: str, sample_path: Path) 
     during training must exist as raster files.  Only missing files are created.
 
     The cr() basis is rebuilt from the SAME training sample patsy memorized at fit
-    time (boundary + interior knots), then applied to the full raster via
-    build_design_matrices.  This guarantees the prediction basis matches the fitted
-    betas, and — because the memorized knots are reused — lets us evaluate the raster
-    in chunks without patsy re-deriving (and rejecting) knots per chunk.  Evaluating
-    all ~288M valid pixels in one dmatrix call allocates a ~10 GB (n_knots, N) temp
-    and OOMs; chunking caps the temp at a few hundred MB.
+    time (boundary + interior knots), then applied via build_design_matrices.  This
+    guarantees the prediction basis matches the fitted betas, and — because the
+    memorized knots are reused — lets us evaluate the raster in GDAL-block windows
+    without patsy re-deriving (and rejecting) knots per window.  cr() is a pure
+    per-pixel function of the memorized knots, so a windowed evaluation is bit-
+    identical to evaluating the whole raster at once, while never holding the full
+    source array, the full valid mask, or the full basis columns in RAM (evaluating
+    all ~288M valid pixels in one dmatrix call allocates a ~10 GB temp and OOMs).
     """
     if "hgu_b1" not in formula and "hgu_b2" not in formula:
         return
@@ -118,7 +130,7 @@ def _create_hgu_spline_rasters(data_dir: Path, formula: str, sample_path: Path) 
 
     # Recover the trained spline state: patsy cr() memorizes boundary knots from the
     # sample's data range during fit. Rebuilding from sample.csv reproduces exactly
-    # that state so build_design_matrices reuses it (no per-chunk knot re-derivation).
+    # that state so build_design_matrices reuses it (no per-window knot re-derivation).
     train_hgu = pd.read_csv(sample_path)["hgu_signed_dist"].to_numpy(dtype=np.float64)
     train_hgu = train_hgu[~np.isnan(train_hgu)]
     design_info = dmatrix(
@@ -129,52 +141,50 @@ def _create_hgu_spline_rasters(data_dir: Path, formula: str, sample_path: Path) 
     ds = gdal.Open(str(src_path))
     band = ds.GetRasterBand(1)
     nodata = band.GetNoDataValue()
-    arr = band.ReadAsArray().astype(np.float64)
     gt = ds.GetGeoTransform()
     proj = ds.GetProjection()
-    ny, nx = arr.shape
-    ds = None
+    nx, ny = band.XSize, band.YSize
+    bx, by = band.GetBlockSize()
 
-    valid = (arr != nodata) if nodata is not None else np.ones((ny, nx), dtype=bool)
-    x_valid = arr[valid].ravel()
-    del arr  # free full raster; valid mask is sufficient for scatter-write
-    n_valid = len(x_valid)
-
-    # Only hgu_b1/hgu_b2 (basis cols 0/1) feed the model — materialise just those,
-    # not all n_basis full-length columns. Apply the memorized basis in 5M-pixel
-    # chunks to avoid the ~10 GB monolithic temp.
-    want_idx = sorted({min(("hgu_b1", "hgu_b2").index(n), n_basis - 1) for n in needed})
-    _CHUNK = 5_000_000
-    dm_cols = {j: np.empty(n_valid, dtype=np.float32) for j in want_idx}
-    for start in range(0, n_valid, _CHUNK):
-        end = min(start + _CHUNK, n_valid)
-        chunk = np.asarray(
-            build_design_matrices([design_info], {"x": x_valid[start:end]})[0]
-        )
-        for j in want_idx:
-            dm_cols[j][start:end] = chunk[:, j].astype(np.float32)
-    del x_valid
-
+    # Create one output raster per needed basis column up front; write per window.
+    drv = gdal.GetDriverByName("GTiff")
+    out_bands = {}  # name -> (out_ds, out_band, basis_col_idx)
     for i, name in enumerate(("hgu_b1", "hgu_b2")):
         if name not in needed:
             continue
-        out_path = data_dir / f"{name}.tif"
-        col_idx = min(i, n_basis - 1)
-        out_arr = np.full((ny, nx), -9999.0, dtype=np.float32)
-        out_arr[valid] = dm_cols[col_idx]
-
-        out_ds = gdal.GetDriverByName("GTiff").Create(
-            str(out_path), nx, ny, 1, gdal.GDT_Float32,
+        out_ds = drv.Create(
+            str(data_dir / f"{name}.tif"), nx, ny, 1, gdal.GDT_Float32,
             ["COMPRESS=LZW", "TILED=YES"],
         )
         out_ds.SetGeoTransform(gt)
         out_ds.SetProjection(proj)
-        out_band = out_ds.GetRasterBand(1)
-        out_band.WriteArray(out_arr)
-        out_band.SetNoDataValue(-9999.0)
-        out_band.FlushCache()
-        out_ds = None
-        logger.info("Created spline raster: %s", out_path.name)
+        ob = out_ds.GetRasterBand(1)
+        ob.SetNoDataValue(-9999.0)
+        out_bands[name] = (out_ds, ob, min(i, n_basis - 1))
+
+    for yoff in range(0, ny, by):
+        ywin = min(by, ny - yoff)
+        for xoff in range(0, nx, bx):
+            xwin = min(bx, nx - xoff)
+            blk = band.ReadAsArray(xoff, yoff, xwin, ywin).astype(np.float64)
+            valid = (blk != nodata) if nodata is not None else np.ones_like(blk, dtype=bool)
+            basis = None
+            if valid.any():
+                basis = np.asarray(
+                    build_design_matrices([design_info], {"x": blk[valid].ravel()})[0]
+                )
+            for _, ob, col_idx in out_bands.values():
+                out_blk = np.full((ywin, xwin), -9999.0, dtype=np.float32)
+                if basis is not None:
+                    out_blk[valid] = basis[:, col_idx].astype(np.float32)
+                ob.WriteArray(out_blk, xoff, yoff)
+
+    ds = None
+    for name, (out_ds, ob, _) in out_bands.items():
+        ob.FlushCache()
+        out_ds.FlushCache()
+        logger.info("Created spline raster: %s.tif", name)
+    out_bands.clear()
 
 
 def predict_risk(ctx: RunContext, model_path: Path, variant: str) -> Path:
