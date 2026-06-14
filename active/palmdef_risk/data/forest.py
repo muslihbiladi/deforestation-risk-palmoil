@@ -47,6 +47,16 @@ import ee
 import numpy as np
 from osgeo import gdal, ogr, osr
 
+from palmdef_risk.data._ee_utils import (
+    _get_extent_from_vector,
+    _parse_aoi,
+    _snap_extent,
+    _make_grid,
+    _download_tile,
+    _mosaic_tiles,
+    _clip_to_vector,
+)
+
 # Suppress GDAL warnings
 gdal.UseExceptions()
 
@@ -63,127 +73,9 @@ MAX_TILE_PIXELS = 12_000_000  # conservative: ~3500x3500
 
 
 # ============================================================
-# AOI parsing
+# Grid saving
+# (AOI parsing, snapping, and tiling now live in data/_ee_utils.py)
 # ============================================================
-
-def _get_extent_from_vector(vector_path):
-    """Get bounding box from a vector file in EPSG:4326.
-
-    :param vector_path: Path to GPKG, SHP, or GeoJSON file.
-    :return: Tuple (xmin, ymin, xmax, ymax) in EPSG:4326.
-    """
-    ds = ogr.Open(str(vector_path))
-    if ds is None:
-        raise FileNotFoundError(
-            f"Cannot open vector file: {vector_path}"
-        )
-    layer = ds.GetLayer()
-    srs_src = layer.GetSpatialRef()
-
-    # Get extent in source CRS
-    xmin, xmax, ymin, ymax = layer.GetExtent()
-
-    # Transform to EPSG:4326 if needed
-    srs_4326 = osr.SpatialReference()
-    srs_4326.ImportFromEPSG(4326)
-    srs_4326.SetAxisMappingStrategy(osr.OAMS_TRADITIONAL_GIS_ORDER)
-
-    if srs_src is not None:
-        srs_src.SetAxisMappingStrategy(osr.OAMS_TRADITIONAL_GIS_ORDER)
-        if not srs_src.IsSame(srs_4326):
-            transform = osr.CoordinateTransformation(srs_src, srs_4326)
-            # Transform all four corners and take envelope
-            corners = [
-                (xmin, ymin), (xmin, ymax),
-                (xmax, ymin), (xmax, ymax),
-            ]
-            xs, ys = [], []
-            for cx, cy in corners:
-                tx, ty, _ = transform.TransformPoint(cx, cy)
-                xs.append(tx)
-                ys.append(ty)
-            xmin, ymin = min(xs), min(ys)
-            xmax, ymax = max(xs), max(ys)
-
-    ds = None
-    return (xmin, ymin, xmax, ymax)
-
-
-def _parse_aoi(aoi, buff=0.0):
-    """Parse AOI into (xmin, ymin, xmax, ymax) with optional buffer.
-
-    :param aoi: Tuple (xmin, ymin, xmax, ymax) or path to vector file.
-    :param buff: Buffer in degrees.
-    :return: Tuple (xmin, ymin, xmax, ymax).
-    """
-    if isinstance(aoi, (tuple, list)) and len(aoi) == 4:
-        xmin, ymin, xmax, ymax = aoi
-    elif isinstance(aoi, (str, Path)):
-        xmin, ymin, xmax, ymax = _get_extent_from_vector(aoi)
-    else:
-        raise ValueError(
-            "aoi must be a (xmin, ymin, xmax, ymax) tuple "
-            "or a path to a vector file."
-        )
-
-    # Apply buffer
-    xmin -= buff
-    ymin -= buff
-    xmax += buff
-    ymax += buff
-
-    return (xmin, ymin, xmax, ymax)
-
-
-# ============================================================
-# Grid snapping and tiling
-# ============================================================
-
-def _snap_extent(extent, scale=SCALE):
-    """Snap extent to the global pixel grid.
-
-    This ensures all tiles share the same pixel origin, preventing
-    misalignment during mosaicking.
-
-    :param extent: Tuple (xmin, ymin, xmax, ymax).
-    :param scale: Pixel size in degrees.
-    :return: Snapped (xmin, ymin, xmax, ymax).
-    """
-    xmin, ymin, xmax, ymax = extent
-    xmin_s = math.floor(xmin / scale) * scale
-    ymin_s = math.floor(ymin / scale) * scale
-    xmax_s = math.ceil(xmax / scale) * scale
-    ymax_s = math.ceil(ymax / scale) * scale
-    return (xmin_s, ymin_s, xmax_s, ymax_s)
-
-
-def _make_grid(extent, tile_size=0.5, scale=SCALE):
-    """Create a grid of tile extents, all snapped to the pixel grid.
-
-    :param extent: Tuple (xmin, ymin, xmax, ymax) - already snapped.
-    :param tile_size: Approximate tile size in degrees.
-    :param scale: Pixel size in degrees.
-    :return: List of (xmin, ymin, xmax, ymax) tuples.
-    """
-    xmin, ymin, xmax, ymax = extent
-
-    # Snap tile_size to whole number of pixels
-    tile_pixels = round(tile_size / scale)
-    tile_size_snapped = tile_pixels * scale
-
-    tiles = []
-    y = ymin
-    while y < ymax:
-        x = xmin
-        y_top = min(y + tile_size_snapped, ymax)
-        while x < xmax:
-            x_right = min(x + tile_size_snapped, xmax)
-            tiles.append((x, y, x_right, y_top))
-            x = x_right
-        y = y_top
-
-    return tiles
-
 
 def _save_grid_to_gpkg(tiles, output_file):
     """Save tile grid as GeoPackage for reference/debugging.
@@ -285,212 +177,8 @@ def ee_gfc(years, perc=75):
 
 
 # ============================================================
-# Tile downloading with computePixels
-# ============================================================
-
-def _download_tile(args):
-    """Download one tile using ee.data.computePixels.
-
-    This method requests an exact pixel grid from EE, ensuring
-    perfect alignment between adjacent tiles.
-
-    :param args: Tuple of (tile_extent, forest_img, tile_index,
-        output_dir, verbose, n_bands, max_retries).
-    :return: Path to the output tile file, or None on failure.
-    """
-    (tile_extent, forest_img, tile_index, output_dir,
-     verbose, n_bands, max_retries) = args
-    xmin, ymin, xmax, ymax = tile_extent
-    tile_file = os.path.join(output_dir, f"tile_{tile_index:04d}.tif")
-
-    # Calculate exact pixel dimensions
-    n_cols = round((xmax - xmin) / SCALE)
-    n_rows = round((ymax - ymin) / SCALE)
-
-    if n_cols == 0 or n_rows == 0:
-        if verbose:
-            print(f"  Tile {tile_index} SKIPPED: zero dimension")
-        return None
-
-    # Build the computePixels request
-    request = {
-        "expression": forest_img,
-        "fileFormat": "GEO_TIFF",
-        "grid": {
-            "dimensions": {
-                "width": n_cols,
-                "height": n_rows,
-            },
-            "affineTransform": {
-                "scaleX": SCALE,
-                "shearX": 0,
-                "translateX": xmin,
-                "shearY": 0,
-                "scaleY": -SCALE,
-                "translateY": ymax,
-            },
-            "crsCode": "EPSG:4326",
-        },
-    }
-
-    for attempt in range(1, max_retries + 1):
-        try:
-            result = ee.data.computePixels(request)
-
-            with open(tile_file, "wb") as f:
-                f.write(result)
-
-            # Verify the file is valid
-            ds = gdal.Open(tile_file)
-            if ds is None:
-                raise RuntimeError("GDAL cannot open downloaded tile")
-            if ds.RasterCount != n_bands:
-                raise RuntimeError(
-                    f"Expected {n_bands} bands, got {ds.RasterCount}"
-                )
-            ds = None
-
-            if verbose:
-                print(f"  Tile {tile_index} OK "
-                      f"({n_cols}x{n_rows} px, {n_bands} bands)")
-            return tile_file
-
-        except Exception as e:
-            if verbose:
-                print(f"  Tile {tile_index} attempt {attempt}/{max_retries} "
-                      f"FAILED: {e}")
-            if attempt < max_retries:
-                wait = min(2 ** attempt, 30)
-                time.sleep(wait)
-
-    if verbose:
-        print(f"  Tile {tile_index} FAILED after {max_retries} attempts")
-    return None
-
-
-# ============================================================
-# Mosaicking
-# ============================================================
-
-def _mosaic_tiles(tile_files, output_file, crop_extent=None):
-    """Mosaic tiles into a single GeoTIFF using GDAL VRT.
-
-    :param tile_files: List of tile file paths (may contain None).
-    :param output_file: Path for the output GeoTIFF.
-    :param crop_extent: Optional (xmin, ymin, xmax, ymax) to crop.
-    """
-    valid_files = [f for f in tile_files if f is not None and os.path.exists(f)]
-    if not valid_files:
-        raise RuntimeError("No valid tiles to mosaic.")
-
-    # Remove any NoData from tiles (EE may set NoData=0 which
-    # conflicts with valid 0 = non-forest)
-    for f in valid_files:
-        ds = gdal.Open(f, gdal.GA_Update)
-        if ds is not None:
-            for b in range(1, ds.RasterCount + 1):
-                ds.GetRasterBand(b).DeleteNoDataValue()
-            ds.FlushCache()
-            ds = None
-
-    # Build VRT
-    vrt_file = output_file.replace(".tif", "_mosaic.vrt")
-    vrt_options = gdal.BuildVRTOptions(resolution="highest")
-    vrt_ds = gdal.BuildVRT(vrt_file, valid_files, options=vrt_options)
-    vrt_ds.FlushCache()
-    vrt_ds = None
-
-    # Translate VRT to GeoTIFF (with optional crop)
-    translate_options = {
-        "format": "GTiff",
-        "creationOptions": ["COMPRESS=DEFLATE", "TILED=YES"],
-    }
-
-    if crop_extent is not None:
-        xmin, ymin, xmax, ymax = crop_extent
-        translate_options["projWin"] = [xmin, ymax, xmax, ymin]
-
-    gdal.Translate(output_file, vrt_file, **translate_options)
-
-    # Clean up VRT
-    if os.path.exists(vrt_file):
-        os.remove(vrt_file)
-
-
-def _clip_to_vector(input_file, output_file, vector_path, buff=0.0):
-    """Clip a raster to a vector polygon boundary.
-
-    :param input_file: Path to input GeoTIFF.
-    :param output_file: Path for clipped output GeoTIFF.
-    :param vector_path: Path to vector file (GPKG, SHP, GeoJSON).
-    :param buff: Buffer in degrees applied to the vector geometry.
-    """
-    ds = ogr.Open(str(vector_path))
-    if ds is None:
-        raise FileNotFoundError(
-            f"Cannot open vector file: {vector_path}"
-        )
-    layer = ds.GetLayer()
-    layer_name = layer.GetName()
-    ds = None
-
-    # If buffer is needed, create a buffered vector
-    if buff > 0.0:
-        ds_in = ogr.Open(str(vector_path))
-        layer_in = ds_in.GetLayer()
-        srs = layer_in.GetSpatialRef()
-
-        buff_path = output_file.replace(".tif", "_buff.gpkg")
-        drv = ogr.GetDriverByName("GPKG")
-        if os.path.exists(buff_path):
-            drv.DeleteDataSource(buff_path)
-        ds_buff = drv.CreateDataSource(buff_path)
-        layer_buff = ds_buff.CreateLayer("buffered", srs, ogr.wkbPolygon)
-
-        for feat in layer_in:
-            geom = feat.GetGeometryRef().Buffer(buff)
-            feat_buff = ogr.Feature(layer_buff.GetLayerDefn())
-            feat_buff.SetGeometry(geom)
-            layer_buff.CreateFeature(feat_buff)
-            feat_buff = None
-
-        ds_buff = None
-        ds_in = None
-        cutline_path = buff_path
-        cutline_layer = "buffered"
-    else:
-        cutline_path = str(vector_path)
-        cutline_layer = layer_name
-        buff_path = None
-
-    # CRITICAL: Remove any NoData from source raster before warping.
-    # EE's computePixels may set NoData=0, which causes GDAL Warp
-    # to treat valid 0 (non-forest) pixels as NoData and discard them.
-    src_ds = gdal.Open(input_file, gdal.GA_Update)
-    if src_ds is not None:
-        for b in range(1, src_ds.RasterCount + 1):
-            src_ds.GetRasterBand(b).DeleteNoDataValue()
-        src_ds.FlushCache()
-        src_ds = None
-
-    # Warp with cutline
-    warp_options = gdal.WarpOptions(
-        format="GTiff",
-        cutlineDSName=cutline_path,
-        cutlineLayer=cutline_layer,
-        cropToCutline=True,
-        creationOptions=["COMPRESS=DEFLATE", "TILED=YES"],
-        dstNodata=255,
-    )
-    gdal.Warp(output_file, input_file, options=warp_options)
-
-    # Cleanup buffered vector
-    if buff_path and os.path.exists(buff_path):
-        ogr.GetDriverByName("GPKG").DeleteDataSource(buff_path)
-
-
-# ============================================================
 # Post-processing: export bands and sum
+# (tile download, mosaicking, and clipping now live in data/_ee_utils.py)
 # ============================================================
 
 def export_bands(input_file, output_dir=None, prefix="forest_t",
@@ -927,8 +615,8 @@ def get_fcc(
         tile_size = max_tile_deg
 
     # ---- Snap extent and create tile grid ----
-    snapped_extent = _snap_extent(extent)
-    tiles = _make_grid(snapped_extent, tile_size=tile_size)
+    snapped_extent = _snap_extent(extent, SCALE)
+    tiles = _make_grid(snapped_extent, tile_size, SCALE)
     if verbose:
         print(f"Number of tiles: {len(tiles)}")
 
@@ -946,7 +634,7 @@ def get_fcc(
 
     # ---- Download tiles ----
     download_args = [
-        (tile, forest_img, idx, tile_dir, verbose, n_bands, max_retries)
+        (tile, forest_img, idx, tile_dir, SCALE, n_bands, max_retries, verbose)
         for idx, tile in enumerate(tiles)
     ]
 
@@ -997,7 +685,7 @@ def get_fcc(
             os.remove(mosaic_tmp)
     else:
         # Crop to rectangular extent only
-        crop_extent = _snap_extent(extent) if crop_to_aoi else None
+        crop_extent = _snap_extent(extent, SCALE) if crop_to_aoi else None
         _mosaic_tiles(tile_files, output_file, crop_extent=crop_extent)
 
         # Set NoData=255 on the mosaicked output so reprojection
