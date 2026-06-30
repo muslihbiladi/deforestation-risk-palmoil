@@ -1,4 +1,4 @@
-# palmdef_risk — Deforestation Risk Assessment (Palm Oil, Indonesia)
+# palmdef_risk — Deforestation Risk Assessment in Palm Oil Supply Chain Area
 
 A Python pipeline for modelling spatial deforestation risk driven by palm-oil mill accessibility. Downloads forest cover change and spatial covariates from Google Earth Engine and OpenStreetMap, aligns them to a UTM grid, computes mill accessibility surfaces, and fits Bayesian iCAR spatial models with three progressively richer covariate sets.
 
